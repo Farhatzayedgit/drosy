@@ -4,6 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>دروسي — إدارة الدروس الخصوصية</title>
+<!-- ============================================================
+     تثبيت البرنامج كتطبيق على الموبايل وسطح المكتب
+     ============================================================ -->
+<meta name="theme-color" content="#14202B">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="دروسي">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="description" content="إدارة الدروس الخصوصية — المجموعات والحضور والتحصيل">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%230F6E5C'/%3E%3Ctext x='256' y='352' font-family='Arial,sans-serif' font-size='300' font-weight='bold' fill='%23ffffff' text-anchor='middle'%3E%D8%AF%3C/text%3E%3C/svg%3E">
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%230F6E5C'/%3E%3Ctext x='256' y='352' font-family='Arial,sans-serif' font-size='300' font-weight='bold' fill='%23ffffff' text-anchor='middle'%3E%D8%AF%3C/text%3E%3C/svg%3E">
+<link rel="manifest" id="mf">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
@@ -210,6 +222,7 @@ input[type=email],input[type=password]{width:100%;padding:11px 12px;border:1px s
 <header class="top">
   <div class="logo">د</div>
   <h1 id="hTitle">دروسي<small id="hSub">إدارة الدروس الخصوصية</small></h1>
+  <button class="x hide" id="instBtn" data-act="install" title="ثبّت التطبيق" style="background:rgba(255,255,255,.12);border-color:transparent;color:#fff">⤓</button>
   <button class="x" data-act="cloud" title="السحابة" style="background:rgba(255,255,255,.12);border-color:transparent;color:#fff">☁</button><button class="x" data-act="settings" title="الإعدادات" style="background:rgba(255,255,255,.12);border-color:transparent;color:#fff">⚙</button>
 </header>
 
@@ -239,6 +252,14 @@ var FB_CONFIG = {
   appId: "1:631524642114:web:1087bd6a5aeb98e8e88cdb"
 };
 var FB = { app:null, auth:null, db:null, ready:false, uid:null, role:null, teacherUid:null, err:"" };
+/* ============================================================
+   دخول المدرّس بكلمة سر بس.
+   فايربيز محتاج «هوية» عشان الحماية تشتغل، فبنستخدم بريد داخلي
+   ثابت المستخدم مايشوفهوش ولا يكتبه — هو بيكتب كلمة السر بس.
+   كلمة السر نفسها مش في الكود: بتتحفظ مشفّرة على سيرفر جوجل،
+   عشان الكود منشور على GitHub وأي حد يقدر يقراه.
+   ============================================================ */
+var TEACHER_EMAIL = "teacher@drosy.app";
 
 function fbInit(){
   if(FB.ready || typeof firebase==="undefined") return FB.ready;
@@ -569,16 +590,22 @@ function gateHTML(){
   }
 
   if(m==="teach"){
-    h += '<div class="card"><div class="hd"><h3>دخول المدرّس</h3></div><div class="bd">'+
-      '<label class="f"><span>البريد الإلكتروني</span>'+
-        '<input type="email" id="ga_em" autocomplete="username" placeholder="you@example.com" style="direction:ltr"></label>'+
+    var setup = (GATE.claimed===false);
+    h += '<div class="card"><div class="hd"><h3>'+(setup?"أول مرة — اختار كلمة السر":"دخول المدرّس")+'</h3></div><div class="bd">'+
+      (setup
+        ? '<div class="note warn" style="margin-bottom:11px">'+
+          '<b>دي أول مرة تفتح البرنامج.</b> اختار كلمة سر قوية — دي اللي هتحمي كل بياناتك، '+
+          'وهي اللي هتدخل بيها من أي جهاز.</div>'
+        : '')+
       '<label class="f"><span>كلمة السر</span>'+
-        '<input type="password" id="ga_pw" autocomplete="current-password" style="direction:ltr"></label>'+
+        '<input type="password" id="ga_pw" autocomplete="'+(setup?"new-password":"current-password")+'" '+
+        'style="direction:ltr;text-align:center;font-size:17px;letter-spacing:.06em"></label>'+
+      (setup? '<label class="f"><span>اكتبها تاني للتأكيد</span>'+
+        '<input type="password" id="ga_pw2" autocomplete="new-password" '+
+        'style="direction:ltr;text-align:center;font-size:17px;letter-spacing:.06em"></label>' : '')+
       (GATE.msg? '<div class="note bad" style="margin-bottom:10px">'+esc(GATE.msg)+'</div>':'')+
       '<button class="btn block" data-act="gLogin"'+(GATE.busy?" disabled":"")+'>'+
-        (GATE.busy?"جاري الدخول…":"دخول")+'</button>'+
-      '<button class="btn ghost block" data-act="gSignup" style="margin-top:8px">'+
-        'أول مرة؟ اعمل حساب</button>'+
+        (GATE.busy? "لحظة…" : (setup?"احفظ كلمة السر وادخل":"دخول"))+'</button>'+
       '<button class="btn ghost block" data-act="gBack" style="margin-top:8px">→ رجوع</button>'+
       '</div></div>';
   }
@@ -1648,11 +1675,29 @@ var ACTS = {
 
   /* ---------- البوابة ---------- */
   gBack:  function(){ GATE.mode="pick"; GATE.msg=""; render(); },
-  gTeach: function(){ GATE.mode="teach"; GATE.msg=""; render(); },
+  gTeach: function(){
+    GATE.mode="teach"; GATE.msg=""; render();
+    checkClaimed().then(function(){ render(); });
+  },
   gStu:   function(){ GATE.mode="stu";   GATE.msg=""; render(); },
   gBook:  function(){ GATE.mode="book";  GATE.msg=""; GATE.ok=false; render(); },
-  gLogin: function(){ gAuth(false); },
-  gSignup:function(){ gAuth(true); },
+  gLogin: function(){ gAuth(); },
+  chPw:   function(){ modalChPw(); },
+  chPwGo: function(){
+    var a = val("cp_old"), b = val("cp_new"), c = val("cp_new2");
+    if(!a){ toast("اكتب كلمة السر الحالية"); return; }
+    if(b.length<6){ toast("الجديدة قصيرة — ٦ حروف على الأقل"); return; }
+    if(b!==c){ toast("الجديدة مش متطابقة"); return; }
+    if(!fbOn()){ toast("محتاج نت عشان تغيّرها"); return; }
+    var u = FB.auth.currentUser;
+    if(!u){ toast("سجّل دخول الأول"); return; }
+    var cred = firebase.auth.EmailAuthProvider.credential(TEACHER_EMAIL, a);
+    u.reauthenticateWithCredential(cred).then(function(){
+      return u.updatePassword(b);
+    }).then(function(){
+      closeModal(); toast("اتغيّرت كلمة السر ✓");
+    }).catch(function(e){ toast(gErr(e)); });
+  },
   gStuGo: function(){ gStudentIn(); },
   gBookGo:function(){ gSendBooking(); },
   gWho:   function(el){ GATE.sid = el.dataset.s||""; gLoadNotices().then(render); },
@@ -1715,6 +1760,15 @@ var ACTS = {
     toast("اتحذفت");
   },
   cloud: function(){ modalCloud(); },
+  install: function(){
+    if(INSTALL){
+      INSTALL.prompt();
+      INSTALL.userChoice.then(function(){ INSTALL=null;
+        var b=document.getElementById("instBtn"); if(b) b.classList.add("hide"); });
+    }else{
+      toast("من قايمة المتصفح اختار «إضافة إلى الشاشة الرئيسية»");
+    }
+  },
   syncNow: function(){
     if(!fbOn()){ toast("مفيش اتصال بالنت"); return; }
     toast("جاري المزامنة…");
@@ -1939,22 +1993,28 @@ function restore(){
    ============================================================ */
 function gErr(e){
   var m = String((e && e.code) || (e && e.message) || e);
-  if(/invalid-email/.test(m))        return "البريد مش مكتوب صح";
-  if(/user-not-found/.test(m))       return "الحساب ده مش موجود — اعمل حساب الأول";
-  if(/wrong-password|invalid-cred/.test(m)) return "كلمة السر غلط";
-  if(/email-already-in-use/.test(m)) return "البريد ده متسجّل — سجّل دخول عادي";
+  if(/wrong-password|invalid-cred|invalid-login/.test(m)) return "كلمة السر غلط";
+  if(/user-not-found/.test(m))       return "مفيش حساب لسه";
+  if(/email-already-in-use/.test(m)) return "فيه كلمة سر متسجّلة — اكتبها للدخول";
+  if(/requires-recent-login/.test(m))return "سجّل خروج وادخل تاني الأول";
+  if(/operation-not-allowed/.test(m))return "فعّل Email/Password من فايربيز الأول";
   if(/weak-password/.test(m))        return "كلمة السر قصيرة — ٦ حروف على الأقل";
   if(/network/.test(m))              return "مفيش اتصال بالنت";
   if(/too-many/.test(m))             return "محاولات كتير — استنى شوية";
   return "حصلت مشكلة: " + m;
 }
-function gAuth(isNew){
+function gAuth(){
   if(!fbInit()){ GATE.msg="مش قادر أوصل للسحابة — اتأكد من النت"; render(); return; }
-  var em = val("ga_em").trim(), pw = val("ga_pw");
-  if(!em || !pw){ GATE.msg="اكتب البريد وكلمة السر"; render(); return; }
+  var pw = val("ga_pw");
+  var setup = (GATE.claimed===false);
+  if(!pw){ GATE.msg="اكتب كلمة السر"; render(); return; }
+  if(setup){
+    if(pw.length<6){ GATE.msg="كلمة السر قصيرة — ٦ حروف على الأقل"; render(); return; }
+    if(pw !== val("ga_pw2")){ GATE.msg="كلمتا السر مش متطابقتين"; render(); return; }
+  }
   GATE.busy = true; GATE.msg=""; render();
-  var f = isNew ? FB.auth.createUserWithEmailAndPassword(em,pw)
-                : FB.auth.signInWithEmailAndPassword(em,pw);
+  var f = setup ? FB.auth.createUserWithEmailAndPassword(TEACHER_EMAIL,pw)
+                : FB.auth.signInWithEmailAndPassword(TEACHER_EMAIL,pw);
   f.then(function(c){
     FB.uid = c.user.uid;
     /* أول حساب بيسجّل نفسه كمالك — بعد كده الباب بيتقفل */
@@ -1978,8 +2038,25 @@ function gAuth(isNew){
       toast(got? "أهلًا — البيانات اتحمّلت" : "أهلًا " + (DB.meta.name||""));
     });
   }).catch(function(e){
+    var m = String((e&&e.code)||"");
+    /* الحساب موجود بس كلمة السر غلط، أو مش موجود ولسه محدش أخد الملكية */
+    if(/user-not-found/.test(m) && GATE.claimed!==true){
+      GATE.claimed = false; GATE.busy=false;
+      GATE.msg = "لسه مفيش كلمة سر — اختار واحدة دلوقتي"; render(); return;
+    }
+    if(/email-already-in-use/.test(m)){
+      GATE.claimed = true; GATE.busy=false;
+      GATE.msg = "فيه كلمة سر متسجّلة بالفعل — اكتبها للدخول"; render(); return;
+    }
     GATE.busy=false; GATE.msg=gErr(e); render();
   });
+}
+/* بيشوف هل فيه مالك للبرنامج ولا لسه */
+function checkClaimed(){
+  if(!fbInit()) return Promise.resolve(null);
+  return fbGet("config/teacherUid").then(function(t){
+    GATE.claimed = !!t; return t;
+  }).catch(function(){ GATE.claimed = null; return null; });
 }
 /* دخول الطالب — مجهول + كود المجموعة */
 function gStudentIn(){
@@ -2072,6 +2149,18 @@ function pullBookings(loud){
     if(loud) toast(add? "وصل "+ar(add)+" طلب جديد" : "مفيش طلبات جديدة");
   }).catch(function(){ if(loud) toast("مقدرتش أوصل للسحابة"); });
 }
+function modalChPw(){
+  openModal(mh("تغيير كلمة السر")+'<div class="mb">'+
+    '<div class="note" style="margin-bottom:11px">كلمة السر دي هي اللي بتحمي كل بياناتك. '+
+    'اختار واحدة صعبة ومتقولهاش لحد.</div>'+
+    '<label class="f"><span>كلمة السر الحالية</span>'+
+      '<input type="password" id="cp_old" style="direction:ltr"></label>'+
+    '<label class="f"><span>كلمة السر الجديدة</span>'+
+      '<input type="password" id="cp_new" style="direction:ltr"></label>'+
+    '<label class="f"><span>اكتب الجديدة تاني</span>'+
+      '<input type="password" id="cp_new2" style="direction:ltr"></label>'+
+    '</div>'+mf("غيّرها","chPwGo"));
+}
 /* نافذة حالة السحابة */
 function modalCloud(){
   var on = fbOn();
@@ -2089,6 +2178,7 @@ function modalCloud(){
     '<button class="btn ghost block" data-act="pullBookings" style="margin-bottom:8px">↓ اسحب طلبات الحجز</button>'+
     '<div class="note">شارك <b>رابط البرنامج</b> مع الطلاب — يدخلوا بكود مجموعتهم أو يحجزوا مكانهم.</div>'+
     '<div class="sep"></div>'+
+    '<button class="btn ghost block" data-act="chPw" style="margin-bottom:8px">🔑 غيّر كلمة السر</button>'+
     '<button class="btn ghost block" data-act="gOut" style="color:var(--bad)">تسجيل الخروج</button>'+
     '</div>'+'<div class="mf"><button class="btn" data-act="close">تمام</button></div>');
 }
@@ -2146,6 +2236,43 @@ document.addEventListener("change", function(e){
 });
 $("#mask").addEventListener("click", function(e){ if(e.target===$("#mask")) closeModal(); });
 document.addEventListener("keydown", function(e){ if(e.key==="Escape") closeModal(); });
+
+/* ============================================================
+   التثبيت كتطبيق
+   المانيفست بيتولّد هنا عشان البرنامج يفضل ملف واحد.
+   ============================================================ */
+(function(){
+  var icon = document.querySelector('link[rel="icon"]').getAttribute("href");
+  var manifest = {
+    name: "دروسي — إدارة الدروس الخصوصية",
+    short_name: "دروسي",
+    description: "المجموعات والحضور والتحصيل",
+    start_url: ".", scope: ".", display: "standalone",
+    orientation: "portrait-primary",
+    background_color: "#F7F4EE", theme_color: "#14202B", dir: "rtl", lang: "ar",
+    icons: [
+      { src:icon, sizes:"192x192", type:"image/svg+xml", purpose:"any" },
+      { src:icon, sizes:"512x512", type:"image/svg+xml", purpose:"any" },
+      { src:icon, sizes:"512x512", type:"image/svg+xml", purpose:"maskable" }
+    ]
+  };
+  try{
+    var b = new Blob([JSON.stringify(manifest)], { type:"application/manifest+json" });
+    document.getElementById("mf").href = URL.createObjectURL(b);
+  }catch(e){}
+  /* عامل التخزين — بيخلي البرنامج يفتح من غير نت */
+  if("serviceWorker" in navigator && location.protocol!=="file:"){
+    navigator.serviceWorker.register("sw.js").catch(function(){});
+  }
+})();
+/* زرار «ثبّت التطبيق» لما المتصفح يسمح */
+var INSTALL = null;
+window.addEventListener("beforeinstallprompt", function(e){
+  e.preventDefault(); INSTALL = e;
+  var b = document.getElementById("instBtn");
+  if(b) b.classList.remove("hide");
+});
+window.addEventListener("appinstalled", function(){ INSTALL=null; });
 
 load(); restoreSession();
 </script>
