@@ -1993,7 +1993,8 @@ function restore(){
    ============================================================ */
 function gErr(e){
   var m = String((e && e.code) || (e && e.message) || e);
-  if(/wrong-password|invalid-cred|invalid-login/.test(m)) return "كلمة السر غلط";
+  if(/wrong-password|invalid-cred|invalid-login/.test(m))
+    return "كلمة السر غلط — لو دي أول مرة، اكتب اللي عايزها واضغط دخول وهتتحفظ";
   if(/user-not-found/.test(m))       return "مفيش حساب لسه";
   if(/email-already-in-use/.test(m)) return "فيه كلمة سر متسجّلة — اكتبها للدخول";
   if(/requires-recent-login/.test(m))return "سجّل خروج وادخل تاني الأول";
@@ -2013,8 +2014,29 @@ function gAuth(){
     if(pw !== val("ga_pw2")){ GATE.msg="كلمتا السر مش متطابقتين"; render(); return; }
   }
   GATE.busy = true; GATE.msg=""; render();
-  var f = setup ? FB.auth.createUserWithEmailAndPassword(TEACHER_EMAIL,pw)
-                : FB.auth.signInWithEmailAndPassword(TEACHER_EMAIL,pw);
+  /* ============================================================
+     فايربيز الجديد بيخفي إن الحساب مش موجود ويرجّع «بيانات غلط»
+     زي كلمة السر الغلط بالظبط — عشان محدش يخمّن الحسابات.
+     فبنجرّب الدخول الأول، ولو فشل بنجرّب نعمل الحساب. لو طلع
+     موجود بالفعل يبقى فعلًا كلمة السر غلط.
+     ============================================================ */
+  var f = setup
+    ? FB.auth.createUserWithEmailAndPassword(TEACHER_EMAIL,pw)
+    : FB.auth.signInWithEmailAndPassword(TEACHER_EMAIL,pw).catch(function(e){
+        var m = String((e&&e.code)||"");
+        if(!/user-not-found|invalid-cred|invalid-login|wrong-password/.test(m)) throw e;
+        if(pw.length<6) throw { code:"auth/weak-password" };
+        if(!confirm("مفيش كلمة سر متسجّلة لحد دلوقتي.\n\n"+
+                    "تحب نحفظ اللي كتبته دلوقتي ككلمة سر البرنامج؟\n"+
+                    "لو ده مش قصدك اضغط إلغاء وحاول تاني.")) throw e;
+        return FB.auth.createUserWithEmailAndPassword(TEACHER_EMAIL,pw)
+          .catch(function(e2){
+            var m2 = String((e2&&e2.code)||"");
+            /* الحساب موجود فعلًا — يبقى كلمة السر غلط */
+            if(/email-already-in-use/.test(m2)) throw e;
+            throw e2;
+          });
+      });
   f.then(function(c){
     FB.uid = c.user.uid;
     /* أول حساب بيسجّل نفسه كمالك — بعد كده الباب بيتقفل */
