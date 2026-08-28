@@ -309,7 +309,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "2.2";
+var APP_VER = "2.3";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -2971,6 +2971,12 @@ function modalSettings(){
       '</select></label>'+
     '</div>'+
     '<div class="note">البيانات محفوظة على جهازك بس — مش على أي سيرفر. خد نسخة احتياطية من التقارير.</div>'+
+    '<div class="sep"></div>'+
+    '<div class="note warn" style="margin-bottom:9px">'+
+      '<b>الإصدار الحالي: v'+APP_VER+'</b><br>'+
+      'لو رفعت نسخة جديدة ولسه شايف القديمة، اضغط الزرار ده — بيمسح النسخة '+
+      'المخزّنة على جهازك ويجيب الجديدة.</div>'+
+    '<button class="btn ghost block" data-act="hardUpdate">↻ حدّث البرنامج (امسح المخزّن)</button>'+
     '</div>'+mf("حفظ","saveMeta"));
 }
 
@@ -3380,6 +3386,29 @@ var ACTS = {
     toast("اتحذفت");
   },
   cloud: function(){ modalCloud(); },
+  /* ============================================================
+     تحديث قسري — بيمسح كل نسخة مخزّنة ويعيد التحميل من السيرفر.
+     البيانات مش بتتلمس، ده بيمسح ملفات البرنامج بس.
+     ============================================================ */
+  hardUpdate: function(){
+    if(!confirm("هيتمسح البرنامج المخزّن على الجهاز وينزل من جديد.\n\n"+
+      "بياناتك (الطلاب والمجموعات والفلوس) مش هتتلمس.")) return;
+    toast("بنمسح المخزّن…");
+    var jobs = [];
+    if(window.caches && caches.keys)
+      jobs.push(caches.keys().then(function(ks){
+        return Promise.all(ks.map(function(k){ return caches.delete(k); }));
+      }).catch(function(){}));
+    if(navigator.serviceWorker && navigator.serviceWorker.getRegistrations)
+      jobs.push(navigator.serviceWorker.getRegistrations().then(function(rs){
+        return Promise.all(rs.map(function(r){ return r.unregister(); }));
+      }).catch(function(){}));
+    Promise.all(jobs).then(function(){
+      setTimeout(function(){
+        location.replace(location.pathname + "?v=" + Date.now());
+      }, 600);
+    });
+  },
   install: function(){
     if(INSTALL){
       INSTALL.prompt();
