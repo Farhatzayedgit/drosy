@@ -280,7 +280,7 @@ th{background:var(--paper);font-weight:800;font-size:12px;color:var(--mut);font-
   <h1 id="hTitle">دروسي<small id="hSub">إدارة الدروس الخصوصية</small></h1>
   <button class="x hide" id="instBtn" data-act="install" title="ثبّت التطبيق" style="background:rgba(255,255,255,.12);border-color:transparent;color:#fff">⤓</button>
   <button class="burger" data-act="toggleSide" title="القايمة">☰</button>
-  <button class="x" data-act="cloud" title="السحابة" style="background:rgba(255,255,255,.12);border-color:transparent;color:#fff">☁</button><button class="x" data-act="settings" title="الإعدادات" style="background:rgba(255,255,255,.12);border-color:transparent;color:#fff">⚙</button>
+  <button class="x" data-act="cloud" title="السحابة" style="background:rgba(255,255,255,.12);border-color:transparent;color:#fff">☁</button><button class="x" id="outBtn" data-act="gOut" title="تسجيل الخروج" style="background:rgba(255,255,255,.12);border-color:transparent;color:#fff">⎋</button><button class="x" data-act="settings" title="الإعدادات" style="background:rgba(255,255,255,.12);border-color:transparent;color:#fff">⚙</button>
 </header>
 
 <div class="wrap"><div id="view"></div></div>
@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "4.0";
+var APP_VER = "4.1";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -1466,6 +1466,8 @@ function drawSide(){
   h += '<div class="grp">البرنامج</div>'+
     '<button class="nv" data-act="settings"><span class="i">⚙</span><span class="t">الإعدادات</span></button>'+
     '<button class="nv" data-act="cloud"><span class="i">☁</span><span class="t">السحابة والمزامنة</span></button>'+
+    '<button class="nv" data-act="gOut" style="color:var(--bad)">'+
+      '<span class="i">⎋</span><span class="t">تسجيل الخروج</span></button>'+
     '</div>';
   var el = document.getElementById("side");
   if(el) el.innerHTML = h;
@@ -1493,6 +1495,8 @@ function render(){
     document.body.classList.remove("in");
     document.getElementById("side").style.display = "none";
     closeSide();
+    var ob2 = document.getElementById("outBtn");
+    if(ob2) ob2.style.display = (FB.role==="student") ? "" : "none";
     $("#view").innerHTML = gateHTML();
     $("#hSub").textContent = "إدارة الدروس الخصوصية";
     window.scrollTo(0,0); return;
@@ -1501,12 +1505,15 @@ function render(){
     document.body.classList.remove("in");
     document.getElementById("side").style.display = "none";
     closeSide();
+    var ob2 = document.getElementById("outBtn");
+    if(ob2) ob2.style.display = (FB.role==="student") ? "" : "none";
     $("#view").innerHTML = UI.take ? viewTakeExam()
                          : (UI.stuTab==="exams" ? viewStuExams() : viewStudentPortal());
     $("#hSub").textContent = (GATE.teacher||{}).name || DB.meta.name || "";
     window.scrollTo(0,0); return;
   }
   document.body.classList.add("in");
+  var ob = document.getElementById("outBtn"); if(ob) ob.style.display = "";
   document.getElementById("side").style.display = "";
   drawSide();
   var h = "";
@@ -3983,10 +3990,35 @@ var ACTS = {
     Promise.all([gLoadNotices(), gLoadExams()]).then(render);
   },
   gOut:   function(){
+    var who = (FB.role==="student")
+      ? ("الطالب"+(GATE.sid && GATE.grp && GATE.grp.students && GATE.grp.students[GATE.sid]
+          ? " / "+GATE.grp.students[GATE.sid].n : ""))
+      : (DB.meta.name || "المدرّس");
+    if(!confirm("تسجيل الخروج من حساب «"+who+"»؟\n\n"+
+      "بياناتك محفوظة — هتلاقيها زي ما هي لما تدخل تاني.")) return;
+    return ACTS._doOut();
+  },
+  _doOut: function(){
+    /* ============================================================
+       الخروج بيصفّر كل حالة الجلسة — عشان الحساب اللي بعده
+       ما يشوفش أي بقايا من اللي قبله.
+       بيانات البرنامج نفسها (طلاب · فلوس · امتحانات) مش بتتلمس.
+       ============================================================ */
     try{ if(FB.auth) FB.auth.signOut(); }catch(e){}
     try{ localStorage.removeItem(KEY+"_sess"); }catch(e){}
-    FB.role=null; FB.uid=null; GATE={mode:"pick",code:"",grp:null,sid:"",msg:"",busy:false};
+    try{ scanStop(); }catch(e){}
+    try{ closeModal(); closeSide(); }catch(e){}
+    FB.role = null; FB.uid = null; FB.teacherUid = null;
+    GATE = { mode:"pick", code:"", grp:null, sid:"", msg:"", busy:false,
+             claimed:null, notices:[], exams:[], teacher:null };
+    /* حالة الشاشات */
+    UI.tab="home"; UI.sub=null; UI.q=""; UI.gid=""; UI.stuTab="";
+    UI.take=false; UI.attempt=null; UI.takeId=""; UI.qi=0;
+    UI.lastExam=""; UI.scanLog=[]; UI.impText=""; UI.locked=false;
+    var ob = document.getElementById("outBtn"); if(ob) ob.style.display = "none";
+    document.body.classList.remove("in");
     render();
+    toast("اتسجّل خروجك");
   },
 
   /* ---------- الامتحانات ---------- */
