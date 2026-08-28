@@ -331,6 +331,51 @@ window.addEventListener("error", function(e){
   if(!window.__booted) document.getElementById("sos").style.display = "block";
 });
 </script>
+<!-- زرار تشخيص: بيظهر تقرير بحالة البرنامج عشان نعرف المشكلة فين -->
+<button id="dbgBtn" onclick="showDiag()" style="position:fixed;bottom:8px;inset-inline-start:8px;
+  z-index:998;background:#014A59;color:#fff;border:0;border-radius:8px;padding:6px 10px;
+  font-size:11px;cursor:pointer;opacity:.55;font-family:system-ui">🔎 تشخيص</button>
+<div id="diag" style="display:none;position:fixed;inset:0;z-index:1000;background:#fff;
+  padding:16px;overflow:auto;font-family:monospace;font-size:12px;direction:ltr;text-align:left">
+  <button onclick="document.getElementById('diag').style.display='none'"
+    style="position:sticky;top:0;background:#CC3B3B;color:#fff;border:0;border-radius:8px;
+    padding:8px 14px;font-size:13px;cursor:pointer;margin-bottom:10px">✕ إغلاق</button>
+  <pre id="diagOut" style="white-space:pre-wrap;word-break:break-all;margin:0"></pre>
+</div>
+<script>
+function showDiag(){
+  var L = [];
+  function add(k,v){ L.push(k+": "+v); }
+  try{
+    add("APP_VER", (typeof APP_VER!=="undefined")? APP_VER : "!! غير معرّف");
+    add("booted", !!window.__booted);
+    add("ACTS", (typeof ACTS!=="undefined")? Object.keys(ACTS).length+" أكشن" : "!! غير معرّف");
+    add("render", typeof render);
+    add("DB", (typeof DB!=="undefined" && DB)? "موجود · طلاب "+(DB.students||[]).length : "!! غير معرّف");
+    add("FB.role", (typeof FB!=="undefined")? String(FB.role) : "!!");
+    add("FB.ready", (typeof FB!=="undefined")? FB.ready : "!!");
+    add("firebase", typeof firebase);
+    add("GATE.mode", (typeof GATE!=="undefined")? GATE.mode : "!!");
+    add("viewport", innerWidth+"x"+innerHeight);
+    add("scrollW", document.documentElement.scrollWidth);
+    add("side.display", (function(){var e=document.getElementById("side");return e?getComputedStyle(e).display:"—";})());
+    add("sos.display", (function(){var e=document.getElementById("sos");return e?e.style.display:"—";})());
+    var gt = document.querySelector('[data-act="gTeach"]');
+    if(gt){
+      var r = gt.getBoundingClientRect();
+      var top = document.elementFromPoint(r.x+r.width/2, r.y+r.height/2);
+      add("btn gTeach", Math.round(r.x)+","+Math.round(r.y)+" "+Math.round(r.width)+"x"+Math.round(r.height));
+      add("العنصر فوقه", top? (top.tagName+"."+String(top.className).slice(0,40)) : "null");
+      add("الضغط هيوصل؟", !!(top && top.closest('[data-act="gTeach"]')));
+    } else add("btn gTeach", "!! مش موجود");
+    add("localStorage", (function(){ try{ localStorage.setItem("_t","1"); localStorage.removeItem("_t"); return "شغال"; }catch(e){ return "!! مقفول: "+e.message; } })());
+    add("SW", (navigator.serviceWorker && navigator.serviceWorker.controller)? "شغال" : "مفيش");
+    add("UA", navigator.userAgent.slice(0,90));
+  }catch(e){ L.push("!! خطأ في التشخيص: "+e.message); }
+  document.getElementById("diagOut").textContent = L.join("\n");
+  document.getElementById("diag").style.display = "block";
+}
+</script>
 <div class="scrim" id="scrim" data-act="closeSide"></div>
 <aside class="side" id="side"></aside>
 <div class="mask" id="mask"><div class="modal" id="modal"></div></div>
@@ -413,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "3.5";
+var APP_VER = "3.6";
 var KEY = "dorosy_v1";
 var DB = null;
 
