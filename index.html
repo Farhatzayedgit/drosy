@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "4.1";
+var APP_VER = "4.2";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -1481,6 +1481,26 @@ function closeSide(){
   document.getElementById("scrim").classList.remove("on");
 }
 function render(){
+  try{ _render(); }
+  catch(err){
+    /* ============================================================
+       لو الرسم وقع، الشاشة كانت هتفضل متجمّدة والمستخدم مش فاهم.
+       بنعرض الخطأ وزرار يرجّعه لشاشة آمنة.
+       ============================================================ */
+    try{
+      document.getElementById("view").innerHTML =
+        '<div class="card"><div class="bd">'+
+        '<div class="note bad"><b>حصلت مشكلة في عرض الشاشة</b><br>'+
+        esc(String((err && err.message) || err)).slice(0,200)+'</div>'+
+        '<button class="btn block" data-act="goHome" style="margin-top:10px">'+
+          '↺ ارجع للوحة اليوم</button>'+
+        '<button class="btn ghost block" data-act="gOut" style="margin-top:8px">'+
+          '⎋ تسجيل الخروج</button></div></div>';
+    }catch(e2){}
+    try{ console.error("render:", err); }catch(e3){}
+  }
+}
+function _render(){
   /* البرنامج مقفول؟ شاشة القفل قبل أي حاجة */
   if(UI.locked && DB.lock && DB.lock.on && DB.lock.pin){
     document.getElementById("side").style.display = "none";
@@ -3923,7 +3943,8 @@ function modalSettings(){
    الأحداث
    ============================================================ */
 var ACTS = {
-  tab: function(el){ UI.tab = el.dataset.t; UI.sub = null; UI.q=""; render(); },
+  goHome: function(){ UI.tab="home"; UI.sub=null; UI.take=false; render(); },
+  tab: function(el){  UI.tab = el.dataset.t; UI.sub = null; UI.q=""; render(); },
   /* التنقل من القايمة الجانبية */
   go: function(el){
     UI.tab = el.dataset.t; UI.sub = null; UI.q = "";
@@ -5077,6 +5098,7 @@ function gAuth(){
     FB.role = "teacher";
     try{ localStorage.setItem(KEY+"_sess", JSON.stringify({r:"teacher"})); }catch(e){}
     GATE.busy=false;
+    render();
     return syncDown().then(function(got){
       if(!got) syncUp();
       UI.tab="home"; UI.sub=null; render();
@@ -5422,6 +5444,23 @@ var __sos = document.getElementById("sos"); if(__sos) __sos.style.display = "non
 /* ============================================================
    مؤقت الامتحان — بيسلّم تلقائيًا لما الوقت يخلص
    ============================================================ */
+/* ============================================================
+   حارس التزامن
+   لو الدور اتحط (داخل فعلًا) والشاشة لسه بتعرض البوابة، يبقى
+   في رسم فات. بنصلّحه لوحدنا بدل ما المستخدم يفضل قدام شاشة
+   دخول وهو داخل.
+   ============================================================ */
+setInterval(function(){
+  if(FB.role!=="teacher" && FB.role!=="student") return;
+  if(UI.locked) return;
+  var v = document.getElementById("view");
+  if(!v) return;
+  /* البوابة ظاهرة؟ (أزرارها موجودة) */
+  if(v.querySelector('[data-act="gTeach"]') || v.querySelector('[data-act="gLocal"]')){
+    render();
+  }
+}, 1500);
+
 setInterval(function(){
   if(!UI.take || !UI.attempt) return;
   var e = (GATE.exams||[]).filter(function(x){ return x.id===UI.takeId; })[0];
