@@ -299,6 +299,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
+var APP_VER = "2.0";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -309,7 +310,10 @@ function blank(){
            about:"مدرس رياضيات لجميع المراحل — ابتدائي · إعدادي · ثانوي",
            waAbsent:"", waMark:"", waDue:"" },
     groups:[], students:[], sessions:{}, pays:[],
-    bookings:[], notices:[],
+    bookings:[], notices:[], sesDue:[],
+    years:[],       /* السنوات الدراسية */
+    res:[],         /* موارد المجموعات — روابط وملفات */
+    curYear:"",
     /* الوحدات الجديدة */
     families:[],      /* الأسر — ربط الإخوة ودفعة واحدة */
     exams:[],         /* الامتحانات ودرجاتها */
@@ -330,7 +334,8 @@ function load(){
   catch(e){ DB = blank(); }
   if(!DB.meta) DB = blank();
   ["groups","students","pays","bookings","notices",
-   "families","exams","tasks","books","sales","reminders"].forEach(function(k){
+   "families","exams","tasks","books","sales","reminders","sesDue",
+   "years","res"].forEach(function(k){
     if(!Array.isArray(DB[k])) DB[k] = []; });
   if(!DB.sessions) DB.sessions = {};
   if(!DB.seq) DB.seq = 1;
@@ -487,6 +492,122 @@ function groupStudents(gid){
 }
 function studentGroups(s){ return (s.groups||[]).map(groupById).filter(Boolean); }
 function activeStudents(){ return DB.students.filter(function(s){ return s.status!=="left"; }); }
+
+/* ============================================================
+   كود الطالب و QR
+   كل طالب له كود ثابت. بيتحوّل QR يطبعه الطالب أو يحطه في تليفونه،
+   والمدرّس بيمسحه بالكاميرا فالحضور يتسجّل في ثانية.
+   الـQR بيتولّد هنا بالكامل — من غير مكتبات خارجية عشان يشتغل
+   من غير نت.
+   ============================================================ */
+function genStuCode(){
+  for(var i=0;i<400;i++){
+    var c = "S" + String(Math.floor(Math.random()*9000)+1000);
+    if(!DB.students.some(function(s){ return s.code===c; })) return c;
+  }
+  return "S"+(DB.seq++);
+}
+function ensureStuCodes(){
+  var n2 = 0;
+  DB.students.forEach(function(s){ if(!s.code){ s.code = genStuCode(); n2++; } });
+  if(n2) save();
+  return n2;
+}
+function stuByCode(c){
+  c = String(c||"").trim().toUpperCase();
+  if(!c) return null;
+  for(var i=0;i<DB.students.length;i++)
+    if(String(DB.students[i].code||"").toUpperCase()===c) return DB.students[i];
+  return null;
+}
+/* ============================================================
+   مولّد QR
+   حاولت أكتبه من الأول وقارنت المصفوفة بمولّد مرجعي، فطلعت
+   مختلفة — يعني الماسح مكانش هيقراه. مولّد QR صحيح محتاج تنفيذ
+   دقيق للمواصفة، فبنستخدم مكتبة مجرّبة بدل ما نخاطر بأكواد
+   مايقراهاش الماسح.
+   المكتبة بتتحمّل مرة وتتخزّن، ولو مفيش نت بنعرض الكود كنص كبير
+   يتكتب بالإيد — أحسن من QR غلط.
+   ============================================================ */
+var QR_LIB = "https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js";
+var qrReady = null;
+function loadQR(){
+  if(window.qrcode) return Promise.resolve(true);
+  if(qrReady) return qrReady;
+  qrReady = new Promise(function(res){
+    var sc = document.createElement("script");
+    sc.src = QR_LIB;
+    sc.onload  = function(){ res(!!window.qrcode); };
+    sc.onerror = function(){ res(false); };
+    document.head.appendChild(sc);
+  });
+  return qrReady;
+}
+/* بيرجّع SVG أو null لو المكتبة مش متاحة */
+function qrSVG(text, px){
+  if(!window.qrcode) return null;
+  try{
+    var q = window.qrcode(0, "M");      /* النسخة تلقائية · تصحيح M */
+    q.addData(String(text));
+    q.make();
+    var n = q.getModuleCount(), pad = 2, S = n + pad*2, rects = "";
+    for(var r=0;r<n;r++) for(var c=0;c<n;c++)
+      if(q.isDark(r,c)) rects += '<rect x="'+(c+pad)+'" y="'+(r+pad)+'" width="1" height="1"/>';
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '+S+' '+S+'" '+
+      'width="'+(px||160)+'" height="'+(px||160)+'" shape-rendering="crispEdges">'+
+      '<rect width="'+S+'" height="'+S+'" fill="#fff"/>'+
+      '<g fill="#0E1A2B">'+rects+'</g></svg>';
+  }catch(e){ return null; }
+}
+/* بديل واضح لما المكتبة مش متاحة */
+function codeBox(code){
+  return '<div style="border:2px dashed var(--line);border-radius:12px;padding:18px;text-align:center">'+
+    '<div class="mut" style="font-size:11.5px">كود الطالب</div>'+
+    '<div style="font-family:Cairo,sans-serif;font-weight:900;font-size:30px;'+
+    'letter-spacing:.18em;direction:ltr;margin-top:4px">'+esc(code)+'</div></div>';
+}
+
+/* ============================================================
+   السنوات الدراسية
+   ============================================================ */
+function curYear(){
+  var y = (DB.years||[]).filter(function(x){ return x.id===DB.curYear; })[0];
+  return y || (DB.years||[])[0] || null;
+}
+function newYear(name){
+  var y = { id:uid("y"), name:name, from:today(), active:true, at:Date.now() };
+  DB.years.push(y); DB.curYear = y.id;
+  return y;
+}
+
+/* ============================================================
+   الأرشفة — بدل الحذف
+   ============================================================ */
+function archiveStu(sid, on){
+  var s = studentById(sid); if(!s) return;
+  if(on){ s.status="left"; s.leftAt=today(); }
+  else { s.status="on"; delete s.leftAt; }
+  saveSync();
+}
+function archivedStudents(){ return DB.students.filter(function(s){ return s.status==="left"; }); }
+function archivedGroups(){ return DB.groups.filter(function(g){ return g.status==="off"; }); }
+
+/* ============================================================
+   لوحة الشرف
+   ترتيب الطلاب على ٣ محاور: الدرجات · الحضور · الواجبات
+   ============================================================ */
+function honorBoard(){
+  return activeStudents().map(function(s){
+    var lv = studentLevel(s.id), a = attStats(s.id,null), t = taskRate(s.id);
+    var parts = [], w = 0;
+    if(lv){ parts.push(lv.avg*0.5); w += 0.5; }
+    if(a.tot){ parts.push(a.rate*0.3); w += 0.3; }
+    if(t.tot){ parts.push(t.pct*0.2); w += 0.2; }
+    var score = w ? Math.round(parts.reduce(function(x,y){ return x+y; },0)/w) : null;
+    return { s:s, score:score, lv:lv, a:a, t:t };
+  }).filter(function(x){ return x.score!==null; })
+    .sort(function(a,b){ return b.score-a.score; });
+}
 
 /* ============================================================
    الواتساب — قناة التواصل الأساسية
@@ -686,11 +807,15 @@ function dueMonths(s, g){
 function studentDue(s){
   var due = 0, paid = 0;
   studentGroups(s).forEach(function(g){
+    /* المجموعات اللي بالحصة بتتحسب من سجل الحصص مش بالشهور */
+    if(g.mode==="ses") return;
     dueMonths(s,g).forEach(function(mi){
       due += num(g.fee);
       if(isPaid(s.id,g.id,mi)) paid += num(g.fee);
     });
   });
+  var sd = sesDueOf(s.id);
+  due += sd.due; paid += sd.paid;
   return { due:due, paid:paid, rest: Math.max(0, due-paid) };
 }
 function lateStudents(){
@@ -709,6 +834,57 @@ function totalIncome(){ var t=0; DB.pays.forEach(function(p){ t+=num(p.amount); 
    مفتاح الحصة: «المجموعة|التاريخ» — مصدر واحد للحقيقة.
    ============================================================ */
 function sesKey(gid, d){ return gid+"|"+d; }
+/* ============================================================
+   حالة الحصة
+   الحصة عندها ٣ حالات: لسه · جارية · خلصت.
+   «بدء الحصة» بيفتح الرصد، و«إنهاء الحصة» بيقفله ويحسب المستحق
+   للمجموعات اللي بتتحصّل بالحصة.
+   ============================================================ */
+function sesState(gid, d){
+  var o = DB.sessions[sesKey(gid,d)];
+  if(!o) return "none";
+  if(o.ended) return "done";
+  if(o.started) return "live";
+  var n2 = 0; for(var k in (o.att||{})) n2++;
+  return n2 ? "live" : "none";
+}
+function startSes(gid, d){
+  var k = sesKey(gid,d);
+  if(!DB.sessions[k]) DB.sessions[k] = { att:{}, at:Date.now() };
+  DB.sessions[k].started = Date.now();
+  delete DB.sessions[k].ended;
+  saveSync();
+}
+function endSes(gid, d){
+  var k = sesKey(gid,d);
+  if(!DB.sessions[k]) DB.sessions[k] = { att:{}, at:Date.now() };
+  DB.sessions[k].ended = Date.now();
+  /* المجموعات اللي بالحصة: نسجّل مستحق لكل حاضر */
+  var g = groupById(gid);
+  if(g && g.mode==="ses"){
+    var att = DB.sessions[k].att || {};
+    groupStudents(gid).forEach(function(s){
+      var v = att[s.id];
+      if(v!=="P" && v!=="L") return;
+      var has = DB.sesDue && DB.sesDue.some(function(x){
+        return x.sid===s.id && x.gid===gid && x.date===d; });
+      if(has) return;
+      DB.sesDue = DB.sesDue || [];
+      DB.sesDue.push({ id:uid("sd"), sid:s.id, gid:gid, date:d, amount:num(g.fee), paid:false });
+    });
+  }
+  saveSync();
+}
+/* مستحق حصص الطالب (للمجموعات اللي بالحصة) */
+function sesDueOf(sid){
+  var due=0, paid=0;
+  (DB.sesDue||[]).forEach(function(x){
+    if(x.sid!==sid) return;
+    due += num(x.amount);
+    if(x.paid) paid += num(x.amount);
+  });
+  return { due:due, paid:paid, rest:Math.max(0,due-paid) };
+}
 function sesOf(gid, d){ return DB.sessions[sesKey(gid,d)] || null; }
 function attOf(gid, d, sid){ var s = sesOf(gid,d); return s ? (s.att||{})[sid] : undefined; }
 function setAtt(gid, d, sid, v){
@@ -850,6 +1026,10 @@ var MORE = [
   { id:"book",  name:"الحجز",                d:"طلبات التسجيل الجديدة من صفحة الحجز",            i:"✉" },
   { id:"comm",  name:"التواصل مع الطلاب",    d:"تعليمات لمجموعة أو لطالب أو للكل",               i:"◈" },
   { id:"cert",  name:"شهادات التقدير",       d:"شهادات للمتفوقين والملتزمين — جاهزة للطباعة",     i:"★" },
+  { id:"honor", name:"لوحة الشرف",           d:"ترتيب الطلاب على الدرجات والحضور والواجبات",      i:"♛" },
+  { id:"qr",    name:"أكواد الطلاب و QR",     d:"كارت لكل طالب · وماسح يسجّل الحضور في ثانية",     i:"▣" },
+  { id:"years", name:"السنوات الدراسية",      d:"سنة وفصول · وأرشفة سنة وبدء جديدة",              i:"◷" },
+  { id:"arch",  name:"الأرشيف",               d:"الطلاب والمجموعات المتوقفة",                      i:"⌸" },
   { id:"rep",   name:"التقارير",             d:"أداء المجموعات والدخل والحضور",                   i:"▦" }
 ];
 function render(){
@@ -890,10 +1070,14 @@ function render(){
   else if(UI.tab==="books")  h = viewBooks();
   else if(UI.tab==="remind") h = viewReminders();
   else if(UI.tab==="cert")   h = viewCerts();
+  else if(UI.tab==="honor")  h = viewHonor();
+  else if(UI.tab==="qr")     h = viewQR();
+  else if(UI.tab==="years")  h = viewYears();
+  else if(UI.tab==="arch")   h = viewArchive();
   else                       h = viewReports();
   $("#view").innerHTML = h;
-  $("#hSub").textContent = DB.meta.name ? (DB.meta.name + (DB.meta.subject? " · "+DB.meta.subject : "")) 
-                                        : "إدارة الدروس الخصوصية";
+  $("#hSub").textContent = (DB.meta.name ? (DB.meta.name + (DB.meta.subject? " · "+DB.meta.subject : ""))
+                                        : "إدارة الدروس الخصوصية") + "  ·  v" + APP_VER;
   window.scrollTo(0,0);
 }
 function pageHd(t, s, btns){
@@ -919,13 +1103,31 @@ function viewHome(){
   var h = pageHd("لوحة اليوم", esc(DAYS[dowOf(d)])+" · "+fmtD(d),
     '<button class="btn sm" data-act="newGroup">+ مجموعة</button>');
 
+  /* تحصيل النهاردة — الدفعات ومبيعات المذكرات */
+  var todayIn = 0;
+  DB.pays.forEach(function(p){ if(p.date===d) todayIn += num(p.amount); });
+  (DB.sales||[]).forEach(function(x){ if(x.date===d) todayIn += num(x.amount); });
+  var doneN = gs.filter(function(g){ return sesState(g.id,d)==="done"; }).length;
+  var dueRem = dueReminders().length;
+
   h += '<div class="stats">'+
-    stat("حصص النهاردة", ar(gs.length), gs.length? "اضغط الحصة لتسجيل الحضور" : "مفيش حصص", "") +
-    stat("تحصيل "+MONTHS[curM-1], money(monthIncome(curM)), "", "money") +
+    stat("حصص النهاردة", ar(gs.length),
+         gs.length? ("خلص "+ar(doneN)+" من "+ar(gs.length)) : "مفيش حصص",
+         (gs.length && doneN===gs.length) ? "money" : "acc") +
+    stat("تحصيل النهاردة", money(todayIn),
+         MONTHS[curM-1]+": "+money(monthIncome(curM)), "money") +
     stat("متأخرات", money(late.reduce(function(a,s){ return a+studentDue(s).rest; },0)),
          ar(late.length)+" طالب", late.length?"late":"") +
     stat("الطلاب", ar(activeStudents().length), ar(DB.groups.length)+" مجموعة", "") +
   '</div>';
+
+  if(dueRem){
+    var r0 = dueReminders()[0];
+    h += '<div class="note warn" style="margin-bottom:12px">'+
+      '<b>⏰ تذكير:</b> '+esc(r0.title)+
+      (dueRem>1? ' <span class="mut">وكمان '+ar(dueRem-1)+'</span>':'')+
+      ' <button class="btn ghost sm" data-act="tab" data-t="remind" style="margin-inline-start:6px">شوفهم</button></div>';
+  }
 
   /* حصص النهاردة */
   h += '<div class="card"><div class="hd"><h3>حصص '+esc(DAYS[dowOf(d)])+'</h3>'+
@@ -947,7 +1149,12 @@ function viewHome(){
           ar(st.length)+' طالب'+(g.place? ' · '+esc(g.place):'')+
           (done? ' · اترصد '+ar(done)+(absN?' · '+ar(absN)+' غايب':'') : ' · لسه ماترصدش')+
         '</small></span>'+
-        (done? '<span class="tag ok">تم</span>' : '<span class="tag warn">للرصد</span>')+
+        (function(){
+          var stt = sesState(g.id, d);
+          if(stt==="done") return '<span class="tag ok">خلصت</span>';
+          if(stt==="live") return '<span class="tag warn">جارية</span>';
+          return '<span class="tag">لسه</span>';
+        })()+
         '<span class="chev">‹</span></button>';
     });
   }
@@ -1456,6 +1663,109 @@ function viewCerts(){
   return h+'</div></div>';
 }
 
+/* ---------- لوحة الشرف ---------- */
+function viewHonor(){
+  var list = honorBoard();
+  var h = pageHd("لوحة الشرف", "ترتيب على الدرجات (٥٠٪) والحضور (٣٠٪) والواجبات (٢٠٪)",
+    '<button class="btn ghost sm" data-act="print">⎙ طباعة</button>');
+  if(!list.length)
+    return h+'<div class="card"><div class="bd"><div class="empty"><div class="big">♛</div>'+
+      '<b>مفيش بيانات كفاية</b><p>ارصد امتحانات وحضور الأول عشان الترتيب يظهر.</p></div></div></div>';
+  h += '<div class="card"><div class="bd flush">';
+  list.forEach(function(x,i){
+    var medal = i===0?"🥇":(i===1?"🥈":(i===2?"🥉":ar(i+1)));
+    h += '<button class="item" data-act="openStu" data-s="'+x.s.id+'">'+
+      '<span class="av'+(i<3?" g":"")+'" style="font-size:'+(i<3?"18px":"14px")+'">'+medal+'</span>'+
+      '<span class="tx"><b>'+esc(x.s.name)+'</b><small>'+
+        (x.lv? "درجات "+ar(x.lv.avg)+"٪" : "مفيش درجات")+
+        (x.a.tot? " · حضور "+ar(x.a.rate)+"٪" : "")+
+        (x.t.tot? " · واجبات "+ar(x.t.pct)+"٪" : "")+'</small></span>'+
+      '<span class="tag '+(x.score>=85?"ok":(x.score>=60?"warn":"bad"))+'">'+ar(x.score)+'</span>'+
+      '</button>';
+  });
+  return h+'</div></div>';
+}
+
+/* ---------- أكواد الطلاب و QR ---------- */
+function viewQR(){
+  var studs = activeStudents();
+  var noCode = studs.filter(function(s){ return !s.code; }).length;
+  var h = pageHd("أكواد الطلاب و QR", ar(studs.length)+" طالب",
+    '<button class="btn sm" data-act="qrScan">▣ افتح الماسح</button>'+
+    '<button class="btn ghost sm" data-act="qrSheet">⎙ اطبع الكروت</button>');
+  h += '<div class="note" style="margin-bottom:12px">كل طالب له كود ثابت. اطبع الكروت ووزّعها، '+
+    'وبعدها امسح كود الطالب بالكاميرا فالحضور يتسجّل على طول.</div>';
+  if(noCode)
+    h += '<div class="note warn" style="margin-bottom:12px"><b>'+ar(noCode)+' طالب من غير كود</b>'+
+      ' <button class="btn sm" data-act="qrGen" style="margin-inline-start:6px">ولّد الأكواد</button></div>';
+  if(!studs.length)
+    return h+'<div class="card"><div class="bd"><div class="empty"><b>مفيش طلاب</b></div></div></div>';
+  h += '<div class="card"><div class="bd flush">';
+  studs.forEach(function(s){
+    h += '<button class="item" data-act="qrOne" data-s="'+s.id+'">'+
+      '<span class="av">▣</span>'+
+      '<span class="tx"><b>'+esc(s.name)+'</b><small>'+
+        esc(studentGroups(s).map(function(g){ return g.name; }).join(" · ")||"مش في مجموعة")+'</small></span>'+
+      '<span class="tag code">'+esc(s.code||"—")+'</span><span class="chev">‹</span></button>';
+  });
+  return h+'</div></div>';
+}
+
+/* ---------- السنوات الدراسية ---------- */
+function viewYears(){
+  var cur = curYear();
+  var h = pageHd("السنوات الدراسية", cur? ("الحالية: "+esc(cur.name)) : "لسه مفيش سنة",
+    '<button class="btn sm" data-act="newYear">+ سنة</button>');
+  h += '<div class="note" style="margin-bottom:12px">لما السنة تخلص، ابدأ سنة جديدة — '+
+    'بياناتها بتتأرشف وتفضل موجودة للرجوع ليها.</div>';
+  if(!DB.years.length)
+    return h+'<div class="card"><div class="bd"><div class="empty"><div class="big">◷</div>'+
+      '<b>مفيش سنوات مسجّلة</b><p>سجّل السنة الحالية عشان تقدر تأرشفها بعدين.</p>'+
+      '<button class="btn" data-act="newYear" style="margin-top:10px">+ سجّل السنة الحالية</button></div></div></div>';
+  h += '<div class="card"><div class="bd flush">';
+  DB.years.slice().reverse().forEach(function(y){
+    var on = DB.curYear===y.id;
+    h += '<button class="item" data-act="setYear" data-y="'+y.id+'">'+
+      '<span class="av'+(on?" g":"")+'">◷</span>'+
+      '<span class="tx"><b>'+esc(y.name)+'</b><small>من '+fmtD(y.from)+
+        (y.to? " إلى "+fmtD(y.to):"")+'</small></span>'+
+      (on? '<span class="tag ok">الحالية</span>':'<span class="tag">مؤرشفة</span>')+
+      '</button>';
+  });
+  return h+'</div></div>';
+}
+
+/* ---------- الأرشيف ---------- */
+function viewArchive(){
+  var st = archivedStudents(), gr = archivedGroups();
+  var h = pageHd("الأرشيف", ar(st.length)+" طالب · "+ar(gr.length)+" مجموعة", "");
+  h += '<div class="note" style="margin-bottom:12px">الطلاب والمجموعات المتوقفة — '+
+    'بياناتهم ودفعاتهم محفوظة، وتقدر ترجّعهم في أي وقت.</div>';
+  if(!st.length && !gr.length)
+    return h+'<div class="card"><div class="bd"><div class="empty"><div class="big">⌸</div>'+
+      '<b>الأرشيف فاضي</b></div></div></div>';
+  if(gr.length){
+    h += '<div class="card"><div class="hd"><h3>مجموعات متوقفة</h3></div><div class="bd flush">';
+    gr.forEach(function(g){
+      h += '<div class="item" style="cursor:default"><span class="av w">▤</span>'+
+        '<span class="tx"><b>'+esc(g.name)+'</b><small>'+ar(groupStudents(g.id).length)+' طالب</small></span>'+
+        '<button class="btn ghost sm" data-act="unarchGrp" data-g="'+g.id+'">رجّعها</button></div>';
+    });
+    h += '</div></div>';
+  }
+  if(st.length){
+    h += '<div class="card"><div class="hd"><h3>طلاب متوقفين</h3></div><div class="bd flush">';
+    st.forEach(function(s){
+      h += '<div class="item" style="cursor:default"><span class="av w">'+esc(initials(s.name))+'</span>'+
+        '<span class="tx"><b>'+esc(s.name)+'</b><small>'+
+          (s.leftAt? "من "+fmtD(s.leftAt) : "")+'</small></span>'+
+        '<button class="btn ghost sm" data-act="unarchStu" data-s="'+s.id+'">رجّعه</button></div>';
+    });
+    h += '</div></div>';
+  }
+  return h;
+}
+
 /* ---------- ٤) الفلوس ---------- */
 function viewMoney(){
   var late = lateStudents();
@@ -1784,7 +2094,19 @@ function nextSession(g){
 /* ============================================================
    النوافذ
    ============================================================ */
-function openModal(html){ $("#modal").innerHTML = html; $("#mask").classList.add("on"); }
+function openModal(html){
+  $("#modal").innerHTML = html;
+  $("#mask").classList.add("on");
+  /* عنوان خانة السعر بيتغيّر حسب طريقة التحصيل */
+  var gm = document.getElementById("g_mode");
+  if(gm){
+    var syncFee = function(){
+      var l = document.getElementById("g_feeLbl");
+      if(l) l.textContent = gm.value==="ses" ? "سعر الحصة (جنيه)" : "السعر الشهري (جنيه)";
+    };
+    gm.onchange = syncFee; syncFee();
+  }
+}
 function closeModal(){ $("#mask").classList.remove("on"); $("#modal").innerHTML=""; }
 function mh(t){ return '<div class="mh"><h3>'+esc(t)+'</h3><button class="x" data-act="close">✕</button></div>'; }
 function mf(ok, act){ return '<div class="mf"><button class="btn ghost" data-act="close">إلغاء</button>'+
@@ -1811,7 +2133,17 @@ function modalGroup(gid){
       }).join("")+'</div></label>'+
     '<div class="grid2">'+
     '<label class="f"><span>الوقت</span><input type="time" id="g_time" value="'+esc(g?g.time:"")+'"></label>'+
-    '<label class="f"><span>السعر الشهري (جنيه)</span><input type="number" id="g_fee" inputmode="numeric" value="'+esc(g?g.fee:"")+'" placeholder="300"></label>'+
+    '<label class="f"><span>طريقة التحصيل</span><select id="g_mode">'+
+      '<option value="month"'+(!g||g.mode!=="ses"?" selected":"")+'>اشتراك شهري</option>'+
+      '<option value="ses"'+(g&&g.mode==="ses"?" selected":"")+'>بالحصة</option>'+
+      '</select></label>'+
+    '</div>'+
+    '<div class="grid2">'+
+    '<label class="f"><span id="g_feeLbl">السعر الشهري (جنيه)</span>'+
+      '<input type="number" id="g_fee" inputmode="numeric" value="'+esc(g?g.fee:"")+'" placeholder="300"></label>'+
+    '<label class="f"><span>يوم الدفع من الشهر</span>'+
+      '<input type="number" id="g_payday" inputmode="numeric" min="1" max="28" '+
+      'value="'+esc(g&&g.payday?g.payday:1)+'" placeholder="١"></label>'+
     '</div>'+
     '<label class="f"><span>المكان (اختياري)</span><input type="text" id="g_place" value="'+esc(g?g.place:"")+'" placeholder="السنتر / البيت"></label>'+
     (g? '<div class="note" style="margin-bottom:12px">كود المجموعة: '+
@@ -1835,6 +2167,8 @@ function saveGroup(){
   if(!g.code) g.code = genGroupCode(val("g_sub").trim() || name);
   g.name = name; g.subject = val("g_sub").trim(); g.grade = val("g_grade").trim();
   g.days = days; g.time = val("g_time"); g.fee = num(val("g_fee"));
+  g.mode = val("g_mode")||"month";
+  g.payday = Math.min(28, Math.max(1, num(val("g_payday"),1)));
   g.place = val("g_place").trim();
   if(gid) g.status = val("g_status")||"on";
   saveSync(); closeModal(); render();
@@ -1908,6 +2242,17 @@ function modalSession(gid, d){
   openModal(mh(g.name+" — "+fmtD(d))+'<div class="mb">'+
     '<div class="note" style="margin-bottom:10px">'+esc(DAYS[dowOf(d)])+' · '+
       ar(st.length)+' طالب · حاضر <b>'+ar(pres)+'</b> · غايب <b>'+ar(abs)+'</b></div>'+
+    (function(){
+      var stt = sesState(gid,d);
+      return '<div class="row" style="margin-bottom:10px">'+
+        (stt==="done"
+          ? '<span class="tag ok" style="padding:9px 14px;font-size:13px">✓ الحصة خلصت</span>'+
+            '<button class="btn ghost sm" data-act="reopenSes" data-g="'+gid+'" data-d="'+d+'">إعادة فتح</button>'
+          : (stt==="live"
+            ? '<button class="btn ok sm" data-act="endSes" data-g="'+gid+'" data-d="'+d+'">■ إنهاء الحصة</button>'
+            : '<button class="btn sm" data-act="startSes" data-g="'+gid+'" data-d="'+d+'">▶ ابدأ الحصة</button>'))+
+      '</div>';
+    })()+
     '<div class="row" style="margin-bottom:10px">'+
       '<button class="btn ghost sm" data-act="allPres" data-g="'+gid+'" data-d="'+d+'">✓ الكل حاضر</button>'+
       '<button class="btn ghost sm" data-act="allAbs" data-g="'+gid+'" data-d="'+d+'" style="color:var(--bad)">✕ الكل غايب</button>'+
@@ -2306,6 +2651,133 @@ function makeCert(sid, kind){
   setTimeout(function(){ w.print(); }, 350);
 }
 
+/* ============================================================
+   ماسح الأكواد
+   بيستخدم قارئ الباركود المدمج في المتصفح لو متاح (كروم أندرويد)،
+   وإلا بيسيبك تكتب الكود بالإيد — أهم حاجة إن الحضور يتسجّل.
+   ============================================================ */
+function modalScan(){
+  var gs = DB.groups.filter(function(g){ return g.status!=="off"; });
+  if(!gs.length){ toast("اعمل مجموعة الأول"); return; }
+  UI.scanG = UI.scanG || (groupToday(today())[0]||gs[0]).id;
+  UI.scanLog = UI.scanLog || [];
+  openModal(mh("ماسح الحضور")+'<div class="mb">'+
+    '<label class="f"><span>المجموعة</span><select id="sc_g" data-act="scanG">'+
+      gs.map(function(g){ return '<option value="'+g.id+'"'+(UI.scanG===g.id?" selected":"")+'>'+
+        esc(g.name)+'</option>'; }).join("")+'</select></label>'+
+    '<div id="sc_cam" style="border-radius:12px;overflow:hidden;background:#000;'+
+      'aspect-ratio:4/3;display:grid;place-items:center;color:#fff;font-size:13px">'+
+      'اضغط «شغّل الكاميرا»</div>'+
+    '<div class="row" style="margin-top:9px">'+
+      '<button class="btn sm" data-act="scanStart">▣ شغّل الكاميرا</button>'+
+      '<button class="btn ghost sm" data-act="scanStop">إيقاف</button>'+
+    '</div>'+
+    '<div class="sep"></div>'+
+    '<label class="f"><span>أو اكتب الكود بالإيد</span>'+
+      '<input type="text" id="sc_code" placeholder="S1234" '+
+      'style="direction:ltr;text-align:center;letter-spacing:.2em;font-size:18px"></label>'+
+    '<button class="btn ghost block" data-act="scanManual">سجّل الحضور</button>'+
+    '<div class="sep"></div>'+
+    '<div style="font-size:12.5px;font-weight:700;color:var(--mut);margin-bottom:6px">'+
+      'اتسجّل دلوقتي</div>'+
+    '<div id="sc_log">'+scanLogHTML()+'</div>'+
+    '</div>'+
+    '<div class="mf"><button class="btn" data-act="scanClose">تم</button></div>');
+}
+function scanLogHTML(){
+  var L = UI.scanLog || [];
+  if(!L.length) return '<div class="note">لسه محدش اتسجّل.</div>';
+  return L.slice(0,12).map(function(x){
+    return '<div class="item" style="cursor:default;padding:9px 4px">'+
+      '<span class="av g">✓</span><span class="tx"><b>'+esc(x.name)+'</b>'+
+      '<small>'+esc(x.time)+'</small></span></div>';
+  }).join("");
+}
+function scanHit(code){
+  var s = stuByCode(code);
+  if(!s){ toast("الكود ده مش معروف: "+code); return; }
+  var gid = UI.scanG;
+  if((s.groups||[]).indexOf(gid)<0){
+    toast(s.name+" مش في المجموعة دي");
+    return;
+  }
+  var d = today();
+  if(attOf(gid,d,s.id)==="P"){ toast(s.name+" متسجّل قبل كده"); return; }
+  setAtt(gid, d, s.id, "P");
+  UI.scanLog = UI.scanLog || [];
+  UI.scanLog.unshift({ name:s.name, time:new Date().toLocaleTimeString("ar-EG",{hour:"2-digit",minute:"2-digit"}) });
+  var box = document.getElementById("sc_log");
+  if(box) box.innerHTML = scanLogHTML();
+  var c = document.getElementById("sc_code"); if(c) c.value = "";
+  try{ navigator.vibrate && navigator.vibrate(60); }catch(e){}
+  toast("✓ "+s.name);
+  render();
+}
+var SCAN = { stream:null, timer:null };
+function scanStart(){
+  var box = document.getElementById("sc_cam");
+  if(!box) return;
+  if(!navigator.mediaDevices || !window.BarcodeDetector){
+    box.textContent = "المتصفح ده مايدعمش الماسح — اكتب الكود بالإيد تحت";
+    return;
+  }
+  navigator.mediaDevices.getUserMedia({ video:{ facingMode:"environment" } }).then(function(st){
+    SCAN.stream = st;
+    box.innerHTML = "";
+    var v = document.createElement("video");
+    v.setAttribute("playsinline","");
+    v.style.cssText = "width:100%;height:100%;object-fit:cover";
+    v.srcObject = st; v.play();
+    box.appendChild(v);
+    var det = new window.BarcodeDetector({ formats:["qr_code"] });
+    SCAN.timer = setInterval(function(){
+      det.detect(v).then(function(codes){
+        if(codes && codes.length) scanHit(codes[0].rawValue);
+      }).catch(function(){});
+    }, 700);
+  }).catch(function(){
+    box.textContent = "مقدرتش أفتح الكاميرا — اسمح بالإذن أو اكتب الكود بالإيد";
+  });
+}
+function scanStop(){
+  if(SCAN.timer){ clearInterval(SCAN.timer); SCAN.timer=null; }
+  if(SCAN.stream){ SCAN.stream.getTracks().forEach(function(t){ t.stop(); }); SCAN.stream=null; }
+  var box = document.getElementById("sc_cam");
+  if(box) box.textContent = "الكاميرا متوقفة";
+}
+/* طباعة كروت الأكواد */
+function printCards(ids){
+  loadQR().then(function(okLib){
+    var w = window.open("","_blank");
+    if(!w){ toast("اسمح بالنوافذ المنبثقة"); return; }
+    var cards = ids.map(function(id){
+      var s = studentById(id); if(!s) return "";
+      if(!s.code) s.code = genStuCode();
+      var q = okLib ? qrSVG(s.code, 130) : "";
+      return '<div class="c">'+
+        '<div class="t">'+esc(DB.meta.name||"")+' — '+esc(DB.meta.subject||"")+'</div>'+
+        '<div class="q">'+(q || '<div class="nq">'+esc(s.code)+'</div>')+'</div>'+
+        '<div class="n">'+esc(s.name)+'</div>'+
+        '<div class="k">'+esc(s.code)+'</div></div>';
+    }).join("");
+    saveSync();
+    w.document.write('<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8">'+
+      '<title>كروت الطلاب</title><style>'+
+      '@page{size:A4;margin:10mm}'+
+      'body{margin:0;font-family:system-ui,sans-serif;display:flex;flex-wrap:wrap;gap:6mm;padding:4mm}'+
+      '.c{width:56mm;border:1.5px solid #1F4FD8;border-radius:5mm;padding:4mm;text-align:center;'+
+        'break-inside:avoid;background:linear-gradient(#EEF3FF 1px,transparent 1px) 0 0/6mm 6mm,#fff}'+
+      '.t{font-size:8pt;color:#63748C;margin-bottom:2mm}'+
+      '.q{display:grid;place-items:center;min-height:34mm}'+
+      '.nq{font-size:20pt;font-weight:bold;letter-spacing:3px;direction:ltr}'+
+      '.n{font-size:11pt;font-weight:bold;margin-top:2mm}'+
+      '.k{font-size:13pt;font-weight:bold;letter-spacing:2px;direction:ltr;color:#1F4FD8}'+
+      '</style></head><body>'+cards+'</body></html>');
+    w.document.close();
+    setTimeout(function(){ w.print(); }, 700);
+  });
+}
+
 /* --- الإعدادات --- */
 function modalSettings(){
   openModal(mh("الإعدادات")+'<div class="mb">'+
@@ -2550,6 +3022,94 @@ var ACTS = {
     var d=studentDue(s);
     if(!d.rest){ toast("الطالب سديد"); return; }
     waOpen(contactOf(s), waMsg("due", s, { amount:d.rest, month:MONTHS[new Date().getMonth()] }));
+  },
+  /* ---------- الأكواد و QR ---------- */
+  qrGen: function(){
+    var n2 = ensureStuCodes();
+    saveSync(); render();
+    toast(n2? ("اتولّد "+ar(n2)+" كود") : "كل الطلاب عندهم أكواد");
+  },
+  qrOne: function(el){
+    var s = studentById(el.dataset.s); if(!s) return;
+    if(!s.code){ s.code = genStuCode(); saveSync(); }
+    openModal(mh("كارت "+s.name)+'<div class="mb center">'+
+      '<div id="qrBox" class="center" style="padding:10px">'+codeBox(s.code)+'</div>'+
+      '<div class="note" style="margin-top:11px;text-align:right">'+
+      'اطبع الكارت وسلّمه للطالب، أو صوّره بموبايله. '+
+      'ولما تمسحه بالماسح، الحضور بيتسجّل على طول.</div>'+
+      '</div>'+
+      '<div class="mf"><button class="btn ghost" data-act="close">إغلاق</button>'+
+      '<button class="btn" data-act="qrPrint" data-s="'+s.id+'">⎙ اطبع الكارت</button></div>');
+    /* نحمّل مولّد الـQR ونحط الصورة لما يجهز */
+    loadQR().then(function(okLib){
+      var box = document.getElementById("qrBox");
+      if(!box) return;
+      var svg = okLib ? qrSVG(s.code, 190) : null;
+      box.innerHTML = svg
+        ? svg + '<div style="font-family:Cairo,sans-serif;font-weight:900;font-size:19px;'+
+                'letter-spacing:.16em;direction:ltr;margin-top:8px">'+esc(s.code)+'</div>'
+        : codeBox(s.code) + '<div class="note warn" style="margin-top:9px;text-align:right">'+
+          'مقدرتش أحمّل مولّد الـQR (محتاج نت مرة واحدة). الكود فوق ينفع تكتبه بالإيد في الماسح.</div>';
+    });
+  },
+  qrPrint: function(el){ printCards([el.dataset.s]); },
+  qrSheet: function(){
+    var ids = activeStudents().map(function(s){ return s.id; });
+    if(!ids.length){ toast("مفيش طلاب"); return; }
+    ensureStuCodes(); saveSync();
+    printCards(ids);
+  },
+  /* ---------- دورة الحصة ---------- */
+  startSes: function(el){
+    startSes(el.dataset.g, el.dataset.d);
+    modalSession(el.dataset.g, el.dataset.d); render();
+    toast("الحصة بدأت — ارصد الحضور");
+  },
+  endSes: function(el){
+    var g = groupById(el.dataset.g);
+    var ses = sesOf(el.dataset.g, el.dataset.d) || { att:{} };
+    var n2 = 0; for(var k in (ses.att||{})) n2++;
+    if(!n2 && !confirm("لسه ماترصدتش الحضور. تنهي الحصة برضه؟")) return;
+    endSes(el.dataset.g, el.dataset.d);
+    modalSession(el.dataset.g, el.dataset.d); render();
+    toast(g && g.mode==="ses" ? "الحصة خلصت — واتسجّل مستحقها" : "الحصة خلصت");
+  },
+  reopenSes: function(el){
+    var k = sesKey(el.dataset.g, el.dataset.d);
+    if(DB.sessions[k]) delete DB.sessions[k].ended;
+    saveSync(); modalSession(el.dataset.g, el.dataset.d); render();
+  },
+  qrScan: function(){ modalScan(); },
+  scanStart: function(){ scanStart(); },
+  scanStop:  function(){ scanStop(); },
+  scanClose: function(){ scanStop(); closeModal(); render(); },
+  scanG:     function(){},
+  scanManual: function(){
+    var c = val("sc_code").trim();
+    if(!c){ toast("اكتب الكود"); return; }
+    scanHit(c);
+  },
+  /* ---------- السنوات ---------- */
+  newYear: function(){
+    var nm = prompt("اسم السنة الدراسية:", DB.meta.year || yearNow());
+    if(!nm) return;
+    newYear(nm.trim()); saveSync(); render(); toast("اتسجّلت السنة");
+  },
+  setYear: function(el){
+    if(DB.curYear===el.dataset.y) return;
+    if(!confirm("تخلي دي السنة الحالية؟")) return;
+    DB.curYear = el.dataset.y; saveSync(); render(); toast("اتغيّرت");
+  },
+  /* ---------- الأرشيف ---------- */
+  unarchStu: function(el){ archiveStu(el.dataset.s, false); render(); toast("رجع"); },
+  unarchGrp: function(el){
+    var g = groupById(el.dataset.g); if(!g) return;
+    g.status = "on"; saveSync(); render(); toast("رجعت");
+  },
+  archStu: function(el){
+    var s = studentById(el.dataset.s); if(!s) return;
+    if(!confirm("أرشفة «"+s.name+"»؟\n\nبياناته ودفعاته هتفضل محفوظة، وتقدر ترجّعه من الأرشيف.")) return;
+    archiveStu(s.id, true); closeModal(); UI.sub=null; render(); toast("اتأرشف");
   },
   /* ---------- الحجز ---------- */
   pullBookings: function(){ pullBookings(true); },
@@ -3098,6 +3658,7 @@ document.addEventListener("input", function(e){
 document.addEventListener("change", function(e){
   var el = e.target;
   if(el.dataset && el.dataset.act==="setDate"){ UI.date = el.value; render(); }
+  if(el.dataset && el.dataset.act==="scanG"){ UI.scanG = el.value; }
   /* رصد درجة امتحان */
   if(el.dataset && el.dataset.act==="setMark"){
     var ex = examById(el.dataset.e);
@@ -3141,8 +3702,27 @@ document.addEventListener("keydown", function(e){ if(e.key==="Escape") closeModa
     document.getElementById("mf").href = URL.createObjectURL(b);
   }catch(e){}
   /* عامل التخزين — بيخلي البرنامج يفتح من غير نت */
+  /* ============================================================
+     التحديث الفوري
+     عامل التخزين كان بيمسك النسخة القديمة، فالمستخدم يفتح البرنامج
+     ويلاقيه زي ما هو رغم إننا رفعنا نسخة جديدة.
+     دلوقتي بنسأل عن تحديث كل مرة، وأول ما ييجي بنطبّقه ونعيد التحميل.
+     ============================================================ */
   if("serviceWorker" in navigator && location.protocol!=="file:"){
-    navigator.serviceWorker.register("sw.js").catch(function(){});
+    navigator.serviceWorker.register("sw.js").then(function(reg){
+      reg.update();
+      reg.addEventListener("updatefound", function(){
+        var w = reg.installing;
+        if(!w) return;
+        w.addEventListener("statechange", function(){
+          if(w.state==="installed" && navigator.serviceWorker.controller){
+            toast("فيه تحديث — بنحمّله…");
+            setTimeout(function(){ location.reload(); }, 900);
+          }
+        });
+      });
+      setInterval(function(){ reg.update(); }, 60*60*1000);
+    }).catch(function(){});
   }
 })();
 /* زرار «ثبّت التطبيق» لما المتصفح يسمح */
