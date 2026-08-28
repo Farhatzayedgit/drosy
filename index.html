@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "4.6";
+var APP_VER = "4.8";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -618,16 +618,31 @@ function monthKey(mi){ return "m"+mi; }
    ============================================================ */
 var SYNC = { on:false, at:0, busy:false };
 
+/* ============================================================
+   النسخة العامة
+   خصوصية: بيانات المجموعة **مفيهاش أسماء طلاب**. الطالب بيدخل
+   بكوده الشخصي، فمبيشوفش غير بياناته هو ولا أسماء زمايله.
+   ============================================================ */
 function pubSnapshot(){
   var groups = {};
   DB.groups.forEach(function(g){
     if(!g.code) return;
-    var studs = {};
-    groupStudents(g.id).forEach(function(s){ studs[s.id] = { n: s.name }; });
     groups[normCode(g.code)] = {
       name: g.name||"", grade: g.grade||"", subject: g.subject||"",
       days: g.days||[], time: g.time||"", place: g.place||"",
-      fee: num(g.fee), status: g.status||"on", students: studs
+      fee: num(g.fee), status: g.status||"on"
+    };
+  });
+  /* دليل أكواد الطلاب: الكود الشخصي → الاسم ومجموعته */
+  var studs = {};
+  try{ ensureStuCodes(); }catch(e){}
+  activeStudents().forEach(function(st){
+    if(!st.code) return;
+    var gs = studentGroups(st).filter(function(x){ return x.code; });
+    if(!gs.length) return;
+    studs[normCode(st.code)] = {
+      n: st.name, sid: st.id, g: normCode(gs[0].code),
+      gs: gs.map(function(x){ return normCode(x.code); })
     };
   });
   return {
@@ -635,16 +650,19 @@ function pubSnapshot(){
                phone: DB.meta.phone||"", about: DB.meta.about||"",
                year: DB.meta.year||"" },
     groups: groups,
+    students: studs,
     at: Date.now()
   };
 }
 function syncUp(){
   if(!fbOn() || FB.role!=="teacher") return Promise.resolve(false);
   SYNC.busy = true;
+  var snap = pubSnapshot();
   return Promise.all([
     fbSet("private/db", DB),
-    fbSet("pub/teacher", pubSnapshot().teacher),
-    fbSet("pub/groups", pubSnapshot().groups)
+    fbSet("pub/teacher", snap.teacher),
+    fbSet("pub/groups", snap.groups),
+    fbSet("pub/students", snap.students)
   ]).then(function(){
     SYNC.busy=false; SYNC.on=true; SYNC.at=Date.now();
     try{ localStorage.setItem(KEY+"_syncAt", String(SYNC.at)); }catch(e){}
@@ -1246,6 +1264,52 @@ function endSes(gid, d){
   }
   saveSync();
 }
+/* ============================================================
+   فلوس المجموعة
+   لازم تفرّق بين الشهري وبالحصة — كانت بتحسب بالشهور دايمًا،
+   فمجموعة بالحصة بـ٣٠ ج كانت بتطلع «٧٢٠ ج متأخر» (١٢ شهر × طالبين).
+   ============================================================ */
+function groupMoney(g){
+  var studs = groupStudents(g.id);
+  var paid = 0, rest = 0, paidN = 0, restN = 0, late = {};
+  if(g.mode === "ses"){
+    /* بالحصة: من سجل الحصص اللي حضرها الطالب فعلًا */
+    studs.forEach(function(s){
+      sesDuesOf(s.id, g.id).forEach(function(x){
+        if(x.paid){ paid += num(x.amount); paidN++; }
+        else { rest += num(x.amount); restN++; late[s.id] = (late[s.id]||0) + num(x.amount); }
+      });
+    });
+  }else{
+    /* شهري: من شهور اشتراكه لحد الشهر الحالي */
+    studs.forEach(function(s){
+      dueMonths(s, g).forEach(function(mi){
+        if(isPaid(s.id, g.id, mi)){ paid += num(g.fee); paidN++; }
+        else { rest += num(g.fee); restN++; late[s.id] = (late[s.id]||0) + num(g.fee); }
+      });
+    });
+  }
+  return { paid:paid, rest:rest, paidN:paidN, restN:restN,
+           late:late, lateStu:Object.keys(late).length };
+}
+/* تفاصيل متأخرات طالب في مجموعة — بالتواريخ */
+function lateDetail(s, g){
+  var rows = [];
+  if(g.mode === "ses"){
+    sesDuesOf(s.id, g.id).forEach(function(x){
+      if(x.paid) return;
+      rows.push({ what:"حصة "+fmtD(x.date), day:DAYS[dowOf(x.date)],
+                  date:x.date, amount:num(x.amount) });
+    });
+  }else{
+    dueMonths(s, g).forEach(function(mi){
+      if(isPaid(s.id, g.id, mi)) return;
+      rows.push({ what:MONTHS[mi-1]||"", day:"", date:"", amount:num(g.fee) });
+    });
+  }
+  return rows;
+}
+
 /* حصص الطالب في مجموعة بالحصة */
 function sesDuesOf(sid, gid){
   return (DB.sesDue||[]).filter(function(x){
@@ -1758,7 +1822,8 @@ function viewGroups(){
     h += '<button class="item" data-act="openGroup" data-g="'+g.id+'">'+
       '<span class="av">'+esc(initials(g.name))+'</span>'+
       '<span class="tx"><b>'+esc(g.name)+'</b><small>'+
-        ar(st.length)+' طالب · '+esc(dayTxt)+' '+esc(g.time||"")+' · '+money(g.fee)+'/شهر</small></span>'+
+        ar(st.length)+' طالب · '+esc(dayTxt)+' '+esc(g.time||"")+' · '+
+        money(g.fee)+(g.mode==="ses"?"/حصة":"/شهر")+'</small></span>'+
       '<span class="tag code">'+esc(g.code||"—")+'</span>'+
       (g.status==="off"? '<span class="tag">متوقفة</span>':'')+
       '<span class="chev">‹</span></button>';
@@ -1775,19 +1840,18 @@ function viewGroup(gid){
     '<button class="btn ghost sm" data-act="editGroup" data-g="'+gid+'">تعديل</button>'+
     '<button class="btn sm" data-act="addToGroup" data-g="'+gid+'">+ طالب</button>');
 
-  var paidN = 0, dueN = 0;
-  st.forEach(function(s){
-    dueMonths(s,g).forEach(function(mi){
-      if(isPaid(s.id,gid,mi)) paidN += num(g.fee); else dueN += num(g.fee);
-    });
-  });
+  var M = groupMoney(g);
   h += '<div class="stats">'+
     stat("كود المجموعة", '<span style="letter-spacing:.08em">'+esc(g.code||"—")+'</span>',
          "المفتاح الثابت للاستيراد", "")+
     stat("الطلاب", ar(st.length), "", "")+
-    stat("السعر الشهري", money(g.fee), "للطالب", "")+
-    stat("محصّل", money(paidN), "", "money")+
-    stat("متأخر", money(dueN), "", dueN?"late":"")+
+    stat(g.mode==="ses" ? "سعر الحصة" : "السعر الشهري", money(g.fee), "للطالب", "")+
+    stat("محصّل", money(M.paid), M.paidN? ar(M.paidN)+(g.mode==="ses"?" حصة":" شهر"):"", "money")+
+    '<button class="stat'+(M.rest?" late":"")+'" data-act="lateRep" data-g="'+gid+'" '+
+      'style="border:1px solid var(--line);cursor:pointer;text-align:right;font:inherit">'+
+      '<div class="k">متأخر</div><div class="v"'+(M.rest?' style="color:var(--bad)"':'')+'>'+
+      money(M.rest)+'</div><div class="s">'+
+      (M.rest? ar(M.lateStu)+" طالب · اضغط للتفاصيل" : "مفيش متأخرات")+'</div></button>'+
   '</div>';
 
   h += '<div class="card"><div class="hd"><h3>الطلاب</h3>'+
@@ -2837,8 +2901,9 @@ function viewQR(){
   var h = pageHd("أكواد الطلاب و QR", ar(studs.length)+" طالب",
     '<button class="btn sm" data-act="qrScan">▣ افتح الماسح</button>'+
     '<button class="btn ghost sm" data-act="qrSheet">⎙ اطبع الكروت</button>');
-  h += '<div class="note" style="margin-bottom:12px">كل طالب له كود ثابت. اطبع الكروت ووزّعها، '+
-    'وبعدها امسح كود الطالب بالكاميرا فالحضور يتسجّل على طول.</div>';
+  h += '<div class="note" style="margin-bottom:12px"><b>الكود الشخصي</b> هو مفتاح الطالب: '+
+    'بتمسحه بالكاميرا فالحضور يتسجّل، <b>وبيدخل بيه المنصة</b> ويشوف مواعيده وتعليماتك '+
+    'وامتحاناته — من غير ما يشوف بيانات أي طالب تاني.</div>';
   if(noCode)
     h += '<div class="note warn" style="margin-bottom:12px"><b>'+ar(noCode)+' طالب من غير كود</b>'+
       ' <button class="btn sm" data-act="qrGen" style="margin-inline-start:6px">ولّد الأكواد</button></div>';
@@ -3153,29 +3218,13 @@ function modalMsg(scope, gid, sid){
    ============================================================ */
 function viewStudentPortal(){
   var g = GATE.grp; if(!g) return gateHTML();
-  var studs = g.students ? Object.keys(g.students).map(function(k){
-    return { id:k, name:(g.students[k]||{}).n||"" }; }) : [];
-  studs.sort(function(a,b){ return normAr(a.name)<normAr(b.name)?-1:1; });
-  var me = GATE.sid ? studs.filter(function(x){ return x.id===GATE.sid; })[0] : null;
   var T = GATE.teacher || {};
 
   var h = '<div style="display:flex;align-items:center;gap:9px;margin-bottom:12px;flex-wrap:wrap">'+
-    '<div style="flex:1;min-width:160px"><h2 style="font-size:20px">'+esc(g.name||"مجموعتي")+'</h2>'+
-    '<div class="mut" style="font-size:12.5px">كود <b style="direction:ltr">'+esc(GATE.code)+'</b>'+
+    '<div style="flex:1;min-width:160px"><h2 style="font-size:20px">'+esc(GATE.myName||"أهلًا بيك")+'</h2>'+
+    '<div class="mut" style="font-size:12.5px">'+esc(g.name||"مجموعتي")+
     (g.grade? ' · '+esc(g.grade):'')+'</div></div>'+
     '<button class="btn ghost sm" data-act="gOut">خروج</button></div>';
-
-  /* اختيار الاسم — عشان يشوف التعليمات الشخصية */
-  if(studs.length && !me){
-    h += '<div class="card"><div class="hd"><h3>مين فيكم؟</h3></div><div class="bd">'+
-      '<div class="note" style="margin-bottom:10px">اختار اسمك عشان تشوف التعليمات الموجهة ليك.</div>'+
-      '<div class="row">'+studs.map(function(x){
-        return '<button class="btn ghost sm" data-act="gWho" data-s="'+esc(x.id)+'">'+esc(x.name)+'</button>';
-      }).join("")+'</div></div></div>';
-  }else if(me){
-    h += '<div class="note ok" style="margin-bottom:12px">أهلًا <b>'+esc(me.name)+'</b> 👋'+
-      ' <button class="btn ghost sm" data-act="gWho" data-s="" style="margin-inline-start:6px">مش أنا</button></div>';
-  }
 
   /* المواعيد */
   var days = (g.days||[]).map(function(d){ return DAYS[d]; });
@@ -4096,7 +4145,8 @@ function printCards(ids){
         '<div class="t">'+esc(DB.meta.name||"")+' — '+esc(DB.meta.subject||"")+'</div>'+
         '<div class="q">'+(q || '<div class="nq">'+esc(s.code)+'</div>')+'</div>'+
         '<div class="n">'+esc(s.name)+'</div>'+
-        '<div class="k">'+esc(s.code)+'</div></div>';
+        '<div class="k">'+esc(s.code)+'</div>'+
+        '<div class="h2">كودك للدخول على المنصة</div></div>';
     }).join("");
     saveSync();
     w.document.write('<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8">'+
@@ -4109,7 +4159,8 @@ function printCards(ids){
       '.q{display:grid;place-items:center;min-height:34mm}'+
       '.nq{font-size:20pt;font-weight:bold;letter-spacing:3px;direction:ltr}'+
       '.n{font-size:11pt;font-weight:bold;margin-top:2mm}'+
-      '.k{font-size:13pt;font-weight:bold;letter-spacing:2px;direction:ltr;color:#1F4FD8}'+
+      '.k{font-size:13pt;font-weight:bold;letter-spacing:2px;direction:ltr;color:#0E877E}'+
+      '.h2{font-size:7.5pt;color:#6A7F80;margin-top:1.5mm}'+
       '</style></head><body>'+cards+'</body></html>');
     w.document.close();
     setTimeout(function(){ w.print(); }, 700);
@@ -4483,6 +4534,105 @@ function modalHealth(){
     '<div class="mf"><button class="btn ghost" data-act="close">إغلاق</button></div>');
 }
 
+/* ============================================================
+   تقرير المتأخرات
+   بيوري الطلاب اللي عليهم فلوس بس — بالتواريخ والأيام.
+   ============================================================ */
+function modalLateRep(gid){
+  var g = groupById(gid); if(!g) return;
+  var M = groupMoney(g);
+  var studs = groupStudents(gid).filter(function(s){ return M.late[s.id]; })
+    .sort(function(a,b){ return M.late[b.id]-M.late[a.id]; });
+  var h = '<div class="mb">';
+  if(!studs.length){
+    h += '<div class="note ok"><div style="font-size:32px;text-align:center">✓</div>'+
+      '<b>مفيش متأخرات</b><br>كل طلاب المجموعة سديدين.</div>';
+  }else{
+    h += '<div class="note bad" style="margin-bottom:11px">'+
+      '<b>'+ar(studs.length)+' طالب</b> عليهم <b>'+money(M.rest)+'</b>'+
+      (g.mode==="ses"? " عن "+ar(M.restN)+" حصة" : " عن "+ar(M.restN)+" شهر")+'</div>';
+    studs.forEach(function(s){
+      var rows = lateDetail(s, g);
+      h += '<div style="border:1px solid var(--line);border-radius:11px;margin-bottom:9px;overflow:hidden">'+
+        '<div style="display:flex;align-items:center;gap:9px;padding:10px 12px;background:var(--paper)">'+
+          '<span class="av b">'+esc(initials(s.name))+'</span>'+
+          '<span class="tx"><b>'+esc(s.name)+'</b><small>'+
+            ar(rows.length)+(g.mode==="ses"?" حصة":" شهر")+' متأخرة</small></span>'+
+          '<span class="tag bad">'+money(M.late[s.id])+'</span>'+
+        '</div>'+
+        rows.map(function(r){
+          return '<div style="display:flex;align-items:center;gap:9px;padding:8px 12px;'+
+            'border-top:1px solid var(--line2);font-size:13px">'+
+            '<span style="flex:1">'+esc(r.what)+
+            (r.day? ' <span class="mut">· '+esc(r.day)+'</span>':'')+'</span>'+
+            '<span class="tag bad">'+money(r.amount)+'</span></div>';
+        }).join("")+
+        (contactOf(s)
+          ? '<div style="padding:8px 12px;border-top:1px solid var(--line2)">'+
+            '<button class="btn ghost sm block" data-act="waDue" data-s="'+s.id+'">'+
+            '✆ ذكّر ولي الأمر</button></div>' : '')+
+        '</div>';
+    });
+  }
+  h += '</div>';
+  openModal(mh("متأخرات "+g.name)+h+
+    '<div class="mf"><button class="btn ghost" data-act="close">إغلاق</button>'+
+    (studs.length? '<button class="btn" data-act="lateePrint" data-g="'+gid+'">⎙ طباعة</button>':'')+
+    '</div>');
+}
+function printLateRep(gid){
+  var g = groupById(gid); if(!g) return;
+  var M = groupMoney(g);
+  var studs = groupStudents(gid).filter(function(s){ return M.late[s.id]; })
+    .sort(function(a,b){ return M.late[b.id]-M.late[a.id]; });
+  var w = window.open("","_blank");
+  if(!w){ toast("اسمح بالنوافذ المنبثقة"); return; }
+  var body = studs.map(function(s){
+    var rows = lateDetail(s, g);
+    return '<tr class="hd2"><td rowspan="'+(rows.length+1)+'"><b>'+esc(s.name)+'</b>'+
+      (s.guardPhone||s.phone? '<br><small>'+esc(s.guardPhone||s.phone)+'</small>':'')+'</td>'+
+      '<td colspan="3" style="background:#FBECEB"><b>'+Math.round(M.late[s.id])+' ج</b> — '+
+      rows.length+(g.mode==="ses"?" حصة":" شهر")+'</td></tr>'+
+      rows.map(function(r){
+        return '<tr><td>'+esc(r.what)+'</td><td>'+esc(r.day||"—")+'</td>'+
+          '<td>'+Math.round(r.amount)+' ج</td></tr>';
+      }).join("");
+  }).join("");
+  w.document.write('<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8">'+
+    '<title>متأخرات '+esc(g.name)+'</title><style>'+
+    'body{font-family:system-ui,sans-serif;padding:18px;color:#0E1A2B;max-width:800px;margin:0 auto}'+
+    '.hd{text-align:center;border-bottom:3px solid #014A59;padding-bottom:9px;margin-bottom:12px}'+
+    '.hd h1{font-size:19px;margin:0 0 3px;color:#014A59}'+
+    'table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px}'+
+    'th,td{padding:7px 9px;border:1px solid #DCE6E4;text-align:right}'+
+    'th{background:#EDF2F1}'+
+    '.sum{display:flex;gap:10px;margin:12px 0;flex-wrap:wrap}'+
+    '.sum div{border:1px solid #DCE6E4;border-radius:9px;padding:8px 14px;font-size:11.5px}'+
+    '.sum b{display:block;font-size:17px}'+
+    '.ft{display:flex;justify-content:space-between;margin-top:26px;font-size:12px}'+
+    '.ft b{display:block;margin-top:22px}'+
+    '</style></head><body>'+
+    '<div class="hd"><h1>'+esc(DB.meta.name||"")+' — '+esc(DB.meta.subject||"")+'</h1>'+
+    '<div style="font-size:14px;font-weight:bold">كشف المتأخرات: '+esc(g.name)+'</div>'+
+    '<div style="font-size:11.5px;color:#6A7F80">'+
+      (g.mode==="ses"? "تحصيل بالحصة · "+Math.round(g.fee)+" ج للحصة"
+                     : "اشتراك شهري · "+Math.round(g.fee)+" ج للشهر")+
+      ' · '+fmtD(today())+'</div></div>'+
+    '<div class="sum">'+
+      '<div>طلاب عليهم متأخرات<b>'+studs.length+'</b></div>'+
+      '<div>إجمالي المتأخر<b>'+Math.round(M.rest)+' ج</b></div>'+
+      '<div>المحصّل<b>'+Math.round(M.paid)+' ج</b></div>'+
+    '</div>'+
+    '<table><thead><tr><th style="width:28%">الطالب</th>'+
+      '<th>'+(g.mode==="ses"?"الحصة":"الشهر")+'</th><th>اليوم</th><th>المبلغ</th></tr></thead>'+
+    '<tbody>'+body+'</tbody></table>'+
+    '<div class="ft"><span>التاريخ<b>'+fmtD(today())+'</b></span>'+
+    '<span>توقيع المدرّس<b>................</b></span></div>'+
+    '</body></html>');
+  w.document.close();
+  setTimeout(function(){ w.print(); }, 400);
+}
+
 /* --- الإعدادات --- */
 function modalSettings(){
   openModal(mh("الإعدادات")+'<div class="mb">'+
@@ -4599,7 +4749,8 @@ var ACTS = {
     try{ closeModal(); closeSide(); }catch(e){}
     FB.role = null; FB.uid = null; FB.teacherUid = null;
     GATE = { mode:"pick", code:"", grp:null, sid:"", msg:"", busy:false,
-             claimed:null, notices:[], exams:[], teacher:null };
+             claimed:null, notices:[], exams:[], teacher:null,
+             myCode:"", myName:"" };
     /* حالة الشاشات */
     UI.tab="home"; UI.sub=null; UI.q=""; UI.gid=""; UI.stuTab="";
     UI.take=false; UI.attempt=null; UI.takeId=""; UI.qi=0;
@@ -5103,8 +5254,10 @@ var ACTS = {
     openModal(mh("كارت "+s.name)+'<div class="mb center">'+
       '<div id="qrBox" class="center" style="padding:10px">'+codeBox(s.code)+'</div>'+
       '<div class="note" style="margin-top:11px;text-align:right">'+
-      'اطبع الكارت وسلّمه للطالب، أو صوّره بموبايله. '+
-      'ولما تمسحه بالماسح، الحضور بيتسجّل على طول.</div>'+
+      '<b>الكود ده بيعمل حاجتين:</b><br>'+
+      '· تمسحه بالماسح فالحضور يتسجّل على طول<br>'+
+      '· الطالب بيدخل بيه المنصة ويشوف مواعيده وامتحاناته<br>'+
+      'اطبع الكارت وسلّمه له، أو صوّره بموبايله.</div>'+
       '</div>'+
       '<div class="mf"><button class="btn ghost" data-act="close">إغلاق</button>'+
       '<button class="btn" data-act="qrPrint" data-s="'+s.id+'">⎙ اطبع الكارت</button></div>');
@@ -5292,6 +5445,8 @@ var ACTS = {
   editGroup: function(el){ modalGroup(el.dataset.g); },
   saveGroup: saveGroup,
   openGroup: function(el){ UI.sub = { g: el.dataset.g }; render(); },
+  lateRep:    function(el){ modalLateRep(el.dataset.g); },
+  lateePrint: function(el){ closeModal(); printLateRep(el.dataset.g); },
   backGroups: function(){ UI.sub = null; UI.tab = "groups"; render(); },
   delGroup: function(el){
     var g = groupById(el.dataset.g); if(!g) return;
@@ -5862,22 +6017,38 @@ function checkClaimed(){
   }).catch(function(){ GATE.claimed = null; return null; });
 }
 /* دخول الطالب — مجهول + كود المجموعة */
+/* ============================================================
+   دخول الطالب بكوده الشخصي
+   الكود بيدلّنا على الطالب ومجموعته، فمبيشوفش غير بياناته هو
+   ولا أسماء زمايله.
+   ============================================================ */
 function gStudentIn(){
   if(!fbInit()){ GATE.msg="مش قادر أوصل للسحابة — اتأكد من النت"; render(); return; }
   var code = normCode(val("ga_code"));
-  if(code.length<3){ GATE.msg="اكتب كود المجموعة"; render(); return; }
-  GATE.busy=true; GATE.msg=""; GATE.code=code; render();
+  if(code.length<4){ GATE.msg="اكتب كودك الشخصي (زي S1375)"; render(); return; }
+  GATE.busy=true; GATE.msg=""; render();
   FB.auth.signInAnonymously().then(function(c){
     FB.uid = c.user.uid;
-    return Promise.all([ fbGet("pub/groups/"+code), fbGet("pub/teacher") ]);
-  }).then(function(r){
-    var g = r[0];
-    if(!g){ GATE.busy=false; GATE.msg="الكود ده مش موجود — اتأكد منه مع المدرّس"; render(); return; }
-    if(g.status==="off"){ GATE.busy=false; GATE.msg="المجموعة دي متوقفة حاليًا"; render(); return; }
-    GATE.grp = g; GATE.teacher = r[1]||{};
-    FB.role = "student"; GATE.busy=false;
-    try{ localStorage.setItem(KEY+"_sess", JSON.stringify({r:"student",c:code,s:GATE.sid||""})); }catch(e){}
-    return gLoadNotices().then(function(){ render(); });
+    return fbGet("pub/students/"+code);
+  }).then(function(me){
+    if(!me || !me.g){
+      GATE.busy=false;
+      GATE.msg="الكود ده مش موجود — اتأكد منه من كارتك أو اسأل المدرّس";
+      render(); return;
+    }
+    GATE.myCode = code; GATE.sid = me.sid; GATE.myName = me.n || "";
+    GATE.code = me.g;                       /* كود مجموعته — للاستخدام الداخلي */
+    return Promise.all([ fbGet("pub/groups/"+me.g), fbGet("pub/teacher") ]).then(function(r){
+      var g = r[0];
+      if(!g){ GATE.busy=false; GATE.msg="مجموعتك مش متاحة دلوقتي"; render(); return; }
+      if(g.status==="off"){ GATE.busy=false; GATE.msg="مجموعتك متوقفة حاليًا"; render(); return; }
+      GATE.grp = g; GATE.teacher = r[1]||{};
+      FB.role = "student"; GATE.busy=false;
+      try{ localStorage.setItem(KEY+"_sess",
+        JSON.stringify({ r:"student", my:code, c:me.g, s:me.sid, n:me.n })); }catch(e){}
+      render();
+      return Promise.all([gLoadNotices(), gLoadExams()]).then(function(){ render(); });
+    });
   }).catch(function(e){
     GATE.busy=false; GATE.msg=gErr(e); render();
   });
@@ -6010,6 +6181,7 @@ function restoreSession(){
     FB.uid = u.uid;
     if(sess && sess.r==="student" && sess.c){
       GATE.code = sess.c; GATE.sid = sess.s||"";
+      GATE.myCode = sess.my||""; GATE.myName = sess.n||"";
       Promise.all([ fbGet("pub/groups/"+sess.c), fbGet("pub/teacher") ]).then(function(r){
         if(!r[0]) return;
         GATE.grp = r[0]; GATE.teacher = r[1]||{}; FB.role="student";
