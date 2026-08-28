@@ -102,11 +102,13 @@ h1,h2,h3,.dsp{font-family:Cairo,system-ui,sans-serif;font-weight:800;margin:0;li
 .burger{width:36px;height:36px;border-radius:10px;border:0;background:rgba(255,255,255,.14);
         color:#fff;font-size:17px;cursor:pointer;flex:0 0 36px}
 
+/* على الشاشات الكبيرة القايمة ثابتة — بس بعد الدخول بس.
+   قبل الدخول (شاشة البوابة) البرنامج بياخد العرض كله. */
 @media(min-width:1000px){
-  .side{transform:translateX(0);box-shadow:none}
-  .scrim{display:none}
-  .burger{display:none}
-  .wrap{margin-inline-end:268px;max-width:820px}
+  body.in .side{transform:translateX(0);box-shadow:none}
+  body.in .scrim{display:none}
+  body.in .burger{display:none}
+  body.in .wrap{margin-inline-end:268px;max-width:820px}
 }
 
 /* ---------- البطاقات ---------- */
@@ -375,19 +377,35 @@ function fbInit(){
 }
 function fbOn(){ return FB.ready && navigator.onLine!==false; }
 /* قراءة مرة واحدة */
-function fbGet(path){
+/* ============================================================
+   كل نداء للسحابة له مهلة ٨ ثواني.
+   من غير المهلة، لو السيرفر ما ردّش البرنامج بيفضل مستني للأبد
+   والواجهة تبان معلّقة — الأزرار بتتضغط ومفيش رد فعل.
+   ============================================================ */
+function withTimeout(pr, ms, label){
   return new Promise(function(res, rej){
-    if(!fbOn()) return rej(new Error("مفيش اتصال"));
-    FB.db.ref(path).once("value").then(function(sn){ res(sn.val()); }).catch(rej);
+    var done = false;
+    var t = setTimeout(function(){
+      if(done) return; done = true;
+      rej(new Error("انتهت المهلة: "+(label||"الاتصال")));
+    }, ms||8000);
+    pr.then(function(v){ if(done) return; done=true; clearTimeout(t); res(v); })
+      .catch(function(e){ if(done) return; done=true; clearTimeout(t); rej(e); });
   });
+}
+function fbGet(path){
+  if(!fbOn()) return Promise.reject(new Error("مفيش اتصال"));
+  return withTimeout(
+    FB.db.ref(path).once("value").then(function(sn){ return sn.val(); }),
+    8000, "قراءة "+path);
 }
 function fbSet(path, val){
   if(!fbOn()) return Promise.reject(new Error("مفيش اتصال"));
-  return FB.db.ref(path).set(val);
+  return withTimeout(FB.db.ref(path).set(val), 10000, "كتابة "+path);
 }
 function fbPush(path, val){
   if(!fbOn()) return Promise.reject(new Error("مفيش اتصال"));
-  return FB.db.ref(path).push(val);
+  return withTimeout(FB.db.ref(path).push(val), 10000, "إرسال");
 }
 
 /* ============================================================
@@ -395,7 +413,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "3.2";
+var APP_VER = "3.5";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -1040,6 +1058,9 @@ function gateHTML(){
         '✎ احجز مكانك — تسجيل جديد</button>'+
       '<div class="sep"></div>'+
       '<button class="btn ghost block" data-act="gTeach">🔑 دخول المدرّس</button>'+
+      '<div class="sep"></div>'+
+      '<button class="btn ghost block" data-act="gLocal" style="font-size:13.5px">'+
+        '💻 ادخل من غير إنترنت (على الجهاز ده بس)</button>'+
       '</div></div>'+
       '<div class="note center" style="font-size:12px">'+
         '☎ للتواصل: <b style="direction:ltr">'+esc(DB.meta.phone||"")+'</b></div>';
@@ -1240,6 +1261,7 @@ function render(){
   }
   /* مش داخل؟ نعرض البوابة */
   if(FB.role!=="teacher" && FB.role!=="student"){
+    document.body.classList.remove("in");
     document.getElementById("side").style.display = "none";
     closeSide();
     $("#view").innerHTML = gateHTML();
@@ -1247,12 +1269,14 @@ function render(){
     window.scrollTo(0,0); return;
   }
   if(FB.role==="student"){
+    document.body.classList.remove("in");
     document.getElementById("side").style.display = "none";
     closeSide();
     $("#view").innerHTML = viewStudentPortal();
     $("#hSub").textContent = (GATE.teacher||{}).name || DB.meta.name || "";
     window.scrollTo(0,0); return;
   }
+  document.body.classList.add("in");
   document.getElementById("side").style.display = "";
   drawSide();
   var h = "";
@@ -3182,12 +3206,33 @@ var ACTS = {
   /* ---------- البوابة ---------- */
   gBack:  function(){ GATE.mode="pick"; GATE.msg=""; render(); },
   gTeach: function(){
-    GATE.mode="teach"; GATE.msg=""; render();
-    checkClaimed().then(function(){ render(); });
+    /* الشاشة بتظهر فورًا — الفحص في الخلفية ومش بيوقف حاجة */
+    GATE.mode = "teach"; GATE.msg = ""; GATE.claimed = null;
+    render();
+    checkClaimed().then(function(){
+      if(GATE.mode==="teach") render();
+    }).catch(function(){});
   },
   gStu:   function(){ GATE.mode="stu";   GATE.msg=""; render(); },
   gBook:  function(){ GATE.mode="book";  GATE.msg=""; GATE.ok=false; render(); },
   gLogin: function(){ gAuth(); },
+  /* ============================================================
+     الدخول المحلي — من غير سحابة
+     البرنامج بيشتغل كامل على الجهاز، والبيانات بتتحفظ محليًا.
+     مفيد لو النت واقع أو الفايربيز مش مظبوط. تقدر تربط السحابة
+     بعدين من زرار ☁ والبيانات هتترفع.
+     ============================================================ */
+  gLocal: function(){
+    if(!confirm("هتدخل من غير سحابة.\n\n"+
+      "البرنامج هيشتغل كامل والبيانات هتتحفظ على الجهاز ده بس — "+
+      "مش هتتزامن مع أجهزة تانية.\n\n"+
+      "تقدر تربط السحابة بعدين من زرار ☁.")) return;
+    FB.role = "teacher";
+    try{ localStorage.setItem(KEY+"_sess", JSON.stringify({ r:"local" })); }catch(e){}
+    UI.tab = "home"; UI.sub = null;
+    render();
+    toast("أهلًا "+(DB.meta.name||"")+" — الوضع المحلي");
+  },
   chPw:   function(){ modalChPw(); },
   chPwGo: function(){
     var a = val("cp_old"), b = val("cp_new"), c = val("cp_new2");
@@ -3844,6 +3889,8 @@ function gErr(e){
   if(/weak-password/.test(m))        return "كلمة السر قصيرة — ٦ حروف على الأقل";
   if(/network/.test(m))              return "مفيش اتصال بالنت";
   if(/too-many/.test(m))             return "محاولات كتير — استنى شوية";
+  if(/انتهت المهلة/.test(m))
+    return "السحابة مش بترد. اتأكد إن النت شغال، أو ادخل من غير إنترنت من الشاشة الأولى.";
   return "حصلت مشكلة: " + m;
 }
 function gAuth(){
@@ -3862,7 +3909,9 @@ function gAuth(){
      فبنجرّب الدخول الأول، ولو فشل بنجرّب نعمل الحساب. لو طلع
      موجود بالفعل يبقى فعلًا كلمة السر غلط.
      ============================================================ */
-  var f = setup
+  /* المهلة هنا مهمة: من غيرها الزرار يفضل «لحظة…» للأبد لو
+     الفايربيز ما ردّش، والمستخدم يفتكر إن البرنامج معلّق. */
+  var f = withTimeout(setup
     ? FB.auth.createUserWithEmailAndPassword(TEACHER_EMAIL,pw)
     : FB.auth.signInWithEmailAndPassword(TEACHER_EMAIL,pw).catch(function(e){
         var m = String((e&&e.code)||"");
@@ -3878,7 +3927,7 @@ function gAuth(){
             if(/email-already-in-use/.test(m2)) throw e;
             throw e2;
           });
-      });
+      }), 12000, "تسجيل الدخول");
   f.then(function(c){
     FB.uid = c.user.uid;
     /* أول حساب بيسجّل نفسه كمالك — بعد كده الباب بيتقفل */
@@ -4048,10 +4097,25 @@ function modalCloud(){
 }
 /* استرجاع الجلسة */
 function restoreSession(){
+  /* جلسة محلية محفوظة؟ ندخل على طول من غير ما نستنى السحابة */
+  var s0 = null;
+  try{ s0 = JSON.parse(localStorage.getItem(KEY+"_sess")||"null"); }catch(e){}
+  if(s0 && s0.r==="local"){
+    FB.role = "teacher";
+    render();
+    fbInit();                    /* نجهّز السحابة في الخلفية لو حب يربط */
+    return;
+  }
   if(!fbInit()) { render(); return; }
   var sess = null;
   try{ sess = JSON.parse(localStorage.getItem(KEY+"_sess")||"null"); }catch(e){}
+  /* لو الفايربيز ما ردّش خلال ٦ ثواني، نعرض البوابة عادي */
+  var settled = false;
+  setTimeout(function(){
+    if(!settled && !FB.role){ settled = true; render(); }
+  }, 6000);
   FB.auth.onAuthStateChanged(function(u){
+    settled = true;
     if(!u){ if(FB.role) { FB.role=null; render(); } return; }
     FB.uid = u.uid;
     if(sess && sess.r==="student" && sess.c){
