@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "4.4";
+var APP_VER = "4.5";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -1802,23 +1802,134 @@ function viewGroup(gid){
   });
   h += '</div></div>';
 
-  /* آخر الحصص */
-  var ses = [];
-  for(var k in DB.sessions){ var p=k.split("|"); if(p[0]===gid) ses.push(p[1]); }
-  ses.sort().reverse();
-  if(ses.length){
-    h += '<div class="card"><div class="hd"><h3>آخر الحصص</h3></div><div class="bd flush">';
-    ses.slice(0,8).forEach(function(d){
-      var o = sesOf(gid,d), n=0, a=0;
-      for(var q in (o.att||{})){ n++; if(o.att[q]==="A") a++; }
-      h += '<button class="item" data-act="openSes" data-g="'+gid+'" data-d="'+d+'">'+
-        '<span class="av'+(a?" w":"")+'">'+esc(DAYS[dowOf(d)].slice(0,3))+'</span>'+
-        '<span class="tx"><b>'+fmtD(d)+'</b><small>حضر '+ar(n-a)+' من '+ar(n)+
-        (a? ' · '+ar(a)+' غايب':'')+'</small></span><span class="chev">‹</span></button>';
-    });
-    h += '</div></div>';
-  }
+  h += sessionTree(gid);
   return h;
+}
+
+/* ============================================================
+   شجرة الحصص: شهور ← أسابيع ← حصص
+   الشهر بيتقسم ٤ أسابيع بأيام الشهر (١–٧ · ٨–١٤ · ١٥–٢١ · ٢٢–آخر
+   الشهر). تقسيم ثابت وواضح، والمدرّس بيلاقي حصته بسرعة.
+   ============================================================ */
+function weekOfMonth(d){
+  var day = num(String(d).slice(8,10), 1);
+  return Math.min(4, Math.ceil(day/7));
+}
+function weekName(w){ return ["الأسبوع الأول","الأسبوع الثاني","الأسبوع الثالث","الأسبوع الرابع"][w-1]||("أسبوع "+w); }
+function monthKeyOf(d){ return String(d).slice(0,7); }
+function monthName(mk){
+  var p = String(mk).split("-");
+  return (MONTHS[num(p[1],1)-1]||"") + " " + ar(p[0]);
+}
+/* كل حصص المجموعة مرتّبة شهر ← أسبوع */
+function groupSessionTree(gid){
+  var months = {};
+  for(var k in DB.sessions){
+    var p = k.split("|");
+    if(p[0]!==gid) continue;
+    var d = p[1], mk = monthKeyOf(d), w = weekOfMonth(d);
+    months[mk] = months[mk] || { key:mk, weeks:{}, n:0, marked:0 };
+    months[mk].weeks[w] = months[mk].weeks[w] || { w:w, days:[] };
+    months[mk].weeks[w].days.push(d);
+    months[mk].n++;
+    var o = DB.sessions[k], cnt = 0;
+    for(var q in (o.att||{})) cnt++;
+    if(cnt) months[mk].marked++;
+  }
+  return Object.keys(months).sort().reverse().map(function(mk){
+    var m = months[mk];
+    m.weekList = Object.keys(m.weeks).map(Number).sort(function(a,b){ return b-a; })
+      .map(function(w){
+        m.weeks[w].days.sort().reverse();
+        return m.weeks[w];
+      });
+    return m;
+  });
+}
+function sesInfo(gid, d){
+  var o = sesOf(gid, d) || { att:{} };
+  var n2=0, abs=0, late=0;
+  for(var q in (o.att||{})){
+    n2++;
+    if(o.att[q]==="A") abs++;
+    else if(o.att[q]==="L") late++;
+  }
+  return { n:n2, abs:abs, late:late, pres:n2-abs, title:o.title||"",
+           state: o.ended? "done" : (o.started||n2? "live":"none") };
+}
+function sessionTree(gid){
+  var tree = groupSessionTree(gid);
+  UI.openM = UI.openM || {};
+  UI.openW = UI.openW || {};
+  var h = '<div class="card"><div class="hd"><h3>الحصص</h3>'+
+    '<span class="tag">'+ar(tree.reduce(function(a,m){ return a+m.n; },0))+'</span>'+
+    '<button class="btn sm" data-act="addSes" data-g="'+gid+'">+ حصة</button></div>'+
+    '<div class="bd flush">';
+  if(!tree.length)
+    return h + '<div class="empty"><div class="big">◫</div><b>مفيش حصص لسه</b>'+
+      '<p>ابدأ حصة من لوحة اليوم، أو ضيف حصة بتاريخ معيّن من زرار «+ حصة».</p></div></div></div>';
+
+  tree.forEach(function(m){
+    var openM = !!UI.openM[gid+"|"+m.key];
+    h += '<div style="border-bottom:1px solid var(--line2)">'+
+      '<div style="display:flex;align-items:center;gap:10px;padding:12px 14px;background:var(--paper)">'+
+        '<button class="av" data-act="tglM" data-g="'+gid+'" data-m="'+m.key+'" '+
+          'style="border:0;cursor:pointer;font-size:15px">'+(openM?"▾":"▸")+'</button>'+
+        '<button class="tx" data-act="tglM" data-g="'+gid+'" data-m="'+m.key+'" '+
+          'style="border:0;background:0;text-align:right;cursor:pointer;font:inherit">'+
+          '<b>'+esc(monthName(m.key))+'</b>'+
+          '<small>'+ar(m.n)+' حصة · اترصد '+ar(m.marked)+'</small></button>'+
+        '<button class="btn ghost sm" data-act="delMonth" data-g="'+gid+'" data-m="'+m.key+
+          '" style="color:var(--bad);flex:0 0 auto">حذف الشهر</button>'+
+      '</div>';
+    if(openM){
+      m.weekList.forEach(function(wk){
+        var wKey = gid+"|"+m.key+"|"+wk.w;
+        var openW = !!UI.openW[wKey];
+        h += '<div style="padding-inline-start:22px;border-top:1px solid var(--line2)">'+
+          '<div style="display:flex;align-items:center;gap:9px;padding:10px 14px">'+
+            '<button class="av w" data-act="tglW" data-k="'+esc(wKey)+'" '+
+              'style="border:0;cursor:pointer;font-size:13px;width:30px;height:30px;flex:0 0 30px">'+
+              (openW?"▾":"▸")+'</button>'+
+            '<button class="tx" data-act="tglW" data-k="'+esc(wKey)+'" '+
+              'style="border:0;background:0;text-align:right;cursor:pointer;font:inherit">'+
+              '<b style="font-size:13.5px">'+esc(weekName(wk.w))+'</b>'+
+              '<small>'+ar(wk.days.length)+' حصة</small></button>'+
+            '<button class="btn ghost sm" data-act="addSes" data-g="'+gid+'" data-m="'+m.key+
+              '" data-w="'+wk.w+'" style="flex:0 0 auto;padding:5px 9px">+</button>'+
+            '<button class="btn ghost sm" data-act="delWeek" data-g="'+gid+'" data-m="'+m.key+
+              '" data-w="'+wk.w+'" style="color:var(--bad);flex:0 0 auto;padding:5px 9px">✕</button>'+
+          '</div>';
+        if(openW){
+          wk.days.forEach(function(d){
+            var i2 = sesInfo(gid, d);
+            h += '<div style="display:flex;align-items:center;gap:9px;padding:9px 14px 9px 30px;'+
+              'border-top:1px solid var(--line2)">'+
+              '<button class="av'+(i2.abs?" b":(i2.state==="done"?" g":" w"))+'" '+
+                'data-act="openSes" data-g="'+gid+'" data-d="'+d+'" '+
+                'style="border:0;cursor:pointer;font-size:12px">'+esc(DAYS[dowOf(d)].slice(0,3))+'</button>'+
+              '<button class="tx" data-act="openSes" data-g="'+gid+'" data-d="'+d+'" '+
+                'style="border:0;background:0;text-align:right;cursor:pointer;font:inherit">'+
+                '<b style="font-size:13.5px">'+(i2.title? esc(i2.title) : fmtD(d))+'</b>'+
+                '<small>'+(i2.title? fmtD(d)+" · " : "")+
+                (i2.n? 'حضر '+ar(i2.pres)+' من '+ar(i2.n)+
+                  (i2.abs? ' · '+ar(i2.abs)+' غايب':'')+(i2.late? ' · '+ar(i2.late)+' متأخر':'')
+                  : 'لسه ماترصدش')+'</small></button>'+
+              (i2.state==="done"? '<span class="tag ok">خلصت</span>'
+                : (i2.state==="live"? '<span class="tag warn">جارية</span>':''))+
+              '<button class="btn ghost sm" data-act="editSes" data-g="'+gid+'" data-d="'+d+
+                '" style="flex:0 0 auto;padding:5px 9px">✎</button>'+
+              '<button class="btn ghost sm" data-act="delSes" data-g="'+gid+'" data-d="'+d+
+                '" style="color:var(--bad);flex:0 0 auto;padding:5px 9px">✕</button>'+
+              '</div>';
+          });
+        }
+        h += '</div>';
+      });
+    }
+    h += '</div>';
+  });
+  return h + '</div></div>';
 }
 
 /* ---------- ٣) الطلاب ---------- */
@@ -3457,7 +3568,8 @@ function modalSession(gid, d){
   var ses = sesOf(gid,d) || { att:{} };
   var pres = 0, abs = 0;
   st.forEach(function(s){ var v=(ses.att||{})[s.id]; if(v==="P") pres++; else if(v==="A") abs++; });
-  openModal(mh(g.name+" — "+fmtD(d))+'<div class="mb">'+
+  var _t = (sesOf(gid,d)||{}).title;
+  openModal(mh((_t? _t+" — " : g.name+" — ")+fmtD(d))+'<div class="mb">'+
     '<div class="note" style="margin-bottom:10px">'+esc(DAYS[dowOf(d)])+' · '+
       ar(st.length)+' طالب · حاضر <b>'+ar(pres)+'</b> · غايب <b>'+ar(abs)+'</b></div>'+
     (function(){
@@ -4225,6 +4337,41 @@ function printStuReport(sid, from, to, opts){
   setTimeout(function(){ w.print(); }, 450);
 }
 
+/* نافذة إضافة أو تعديل حصة */
+function modalSes(gid, d, mk, w){
+  var g = groupById(gid); if(!g) return;
+  var isNew = !d;
+  var def = d;
+  if(!def){
+    /* لو جاي من أسبوع معيّن، نقترح أول يوم فيه */
+    if(mk && w){
+      var day = (num(w,1)-1)*7 + 1;
+      def = mk + "-" + String(day).padStart(2,"0");
+    }else def = today();
+  }
+  var o = d ? (sesOf(gid,d) || {}) : {};
+  var i2 = d ? sesInfo(gid,d) : null;
+  openModal(mh(isNew? "حصة جديدة" : "تعديل الحصة")+'<div class="mb">'+
+    '<div class="note" style="margin-bottom:11px"><b>'+esc(g.name)+'</b>'+
+      (g.time? ' · '+esc(g.time) : '')+'</div>'+
+    '<label class="f"><span>تاريخ الحصة</span>'+
+      '<input type="date" id="ss_d" value="'+esc(def)+'"></label>'+
+    '<label class="f"><span>اسم الحصة (اختياري)</span>'+
+      '<input type="text" id="ss_t" value="'+esc(o.title||"")+'" '+
+      'placeholder="مثال: مراجعة الوحدة الأولى"></label>'+
+    (i2 && i2.n
+      ? '<div class="note ok">اترصد <b>'+ar(i2.n)+'</b> طالب — حضر '+ar(i2.pres)+
+        (i2.abs? ' · غاب '+ar(i2.abs):'')+'</div>'
+      : '<div class="note">بعد ما تحفظ، افتح الحصة عشان ترصد الحضور.</div>')+
+    '</div>'+
+    '<div class="mf"><button class="btn ghost" data-act="close">إلغاء</button>'+
+    (d? '<button class="btn ghost" data-act="openSes" data-g="'+gid+'" data-d="'+d+
+        '" style="flex:0 0 auto">رصد الحضور</button>':'')+
+    '<button class="btn" data-act="saveSes">'+(isNew?"إضافة":"حفظ")+'</button></div>');
+  $("#modal").dataset.gid = gid;
+  $("#modal").dataset.d = d||"";
+}
+
 /* --- الإعدادات --- */
 function modalSettings(){
   openModal(mh("الإعدادات")+'<div class="mb">'+
@@ -4749,6 +4896,89 @@ var ACTS = {
       }
     }).then(function(){ UI.locked=false; UI.lockMsg=""; render(); })
       .catch(function(){ toast("مقدرتش أتحقق — استخدم الرقم السري"); });
+  },
+  /* ============================================================
+     شجرة الحصص — فتح وإضافة وتعديل وحذف
+     ============================================================ */
+  tglM: function(el){
+    var k = el.dataset.g+"|"+el.dataset.m;
+    UI.openM = UI.openM || {};
+    if(UI.openM[k]) delete UI.openM[k]; else UI.openM[k] = 1;
+    render();
+  },
+  tglW: function(el){
+    var k = el.dataset.k;
+    UI.openW = UI.openW || {};
+    if(UI.openW[k]) delete UI.openW[k]; else UI.openW[k] = 1;
+    render();
+  },
+  addSes:  function(el){ modalSes(el.dataset.g, "", el.dataset.m, el.dataset.w); },
+  editSes: function(el){ modalSes(el.dataset.g, el.dataset.d); },
+  saveSes: function(){
+    var gid = $("#modal").dataset.gid, old = $("#modal").dataset.d;
+    var d = val("ss_d"), t = val("ss_t").trim();
+    if(!d){ toast("اختار تاريخ الحصة"); return; }
+    var k = sesKey(gid, d);
+    if(old && old!==d){
+      /* التاريخ اتغيّر — ننقل الحصة بحضورها */
+      if(DB.sessions[k] && !confirm("فيه حصة في "+fmtD(d)+" بالفعل.\n\n"+
+        "هتتدمج مع الحصة دي. تكمّل؟")) return;
+      var o = DB.sessions[sesKey(gid, old)] || { att:{} };
+      DB.sessions[k] = Object.assign({}, DB.sessions[k]||{}, o);
+      delete DB.sessions[sesKey(gid, old)];
+      /* ننقل مستحقات الحصص كمان */
+      (DB.sesDue||[]).forEach(function(x){ if(x.gid===gid && x.date===old) x.date = d; });
+    }
+    if(!DB.sessions[k]) DB.sessions[k] = { att:{}, at:Date.now() };
+    if(t) DB.sessions[k].title = t; else delete DB.sessions[k].title;
+    /* نفتح الشهر والأسبوع اللي فيهم الحصة */
+    UI.openM = UI.openM || {}; UI.openW = UI.openW || {};
+    UI.openM[gid+"|"+monthKeyOf(d)] = 1;
+    UI.openW[gid+"|"+monthKeyOf(d)+"|"+weekOfMonth(d)] = 1;
+    saveSync(); closeModal(); render();
+    toast(old? "اتحفظت الحصة" : "اتضافت الحصة");
+  },
+  delSes: function(el){
+    var gid = el.dataset.g, d = el.dataset.d;
+    var i2 = sesInfo(gid, d);
+    if(!confirm("حذف حصة "+fmtD(d)+"؟"+
+      (i2.n? "\n\nحضور "+i2.n+" طالب هيتحذف معاها." : "")+
+      "\nمفيش تراجع.")) return;
+    delete DB.sessions[sesKey(gid,d)];
+    DB.sesDue = (DB.sesDue||[]).filter(function(x){ return !(x.gid===gid && x.date===d); });
+    saveSync(); render(); toast("اتحذفت");
+  },
+  delWeek: function(el){
+    var gid = el.dataset.g, mk = el.dataset.m, w = num(el.dataset.w,1);
+    var days = [];
+    for(var k in DB.sessions){
+      var p = k.split("|");
+      if(p[0]===gid && monthKeyOf(p[1])===mk && weekOfMonth(p[1])===w) days.push(p[1]);
+    }
+    if(!days.length) return;
+    if(!confirm("حذف "+weekName(w)+" من "+monthName(mk)+"؟\n\n"+
+      days.length+" حصة بحضورها هتتحذف. مفيش تراجع.")) return;
+    days.forEach(function(d){
+      delete DB.sessions[sesKey(gid,d)];
+      DB.sesDue = (DB.sesDue||[]).filter(function(x){ return !(x.gid===gid && x.date===d); });
+    });
+    saveSync(); render(); toast("اتحذف "+ar(days.length)+" حصة");
+  },
+  delMonth: function(el){
+    var gid = el.dataset.g, mk = el.dataset.m;
+    var days = [];
+    for(var k in DB.sessions){
+      var p = k.split("|");
+      if(p[0]===gid && monthKeyOf(p[1])===mk) days.push(p[1]);
+    }
+    if(!days.length) return;
+    if(!confirm("حذف كل حصص "+monthName(mk)+"؟\n\n"+
+      days.length+" حصة بحضورها هتتحذف. مفيش تراجع.")) return;
+    days.forEach(function(d){
+      delete DB.sessions[sesKey(gid,d)];
+      DB.sesDue = (DB.sesDue||[]).filter(function(x){ return !(x.gid===gid && x.date===d); });
+    });
+    saveSync(); render(); toast("اتحذف "+ar(days.length)+" حصة");
   },
   /* ---------- الأكواد و QR ---------- */
   qrGen: function(){
