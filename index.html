@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "4.5";
+var APP_VER = "4.6";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -1507,6 +1507,12 @@ function drawSide(){
   h += '<div class="grp">البرنامج</div>'+
     '<button class="nv" data-act="settings"><span class="i">⚙</span><span class="t">الإعدادات</span></button>'+
     '<button class="nv" data-act="cloud"><span class="i">☁</span><span class="t">السحابة والمزامنة</span></button>'+
+    (function(){
+      var n2 = healthCheck().reduce(function(a,x){ return a+x.n; }, 0);
+      return '<button class="nv" data-act="health"><span class="i">⚕</span>'+
+        '<span class="t">فحص سلامة البيانات</span>'+
+        (n2? '<span class="b">'+ar(n2)+'</span>' : '<span class="c">✓</span>')+'</button>';
+    })()+
     '<button class="nv" data-act="gOut" style="color:var(--bad)">'+
       '<span class="i">⎋</span><span class="t">تسجيل الخروج</span></button>'+
     '</div>';
@@ -2706,6 +2712,7 @@ function allSessions(){
       else if(att[sid]==="L") late++;
     }
     out.push({ gid:p[0], date:p[1], g:g, n:n2, pres:pres, abs:abs, late:late,
+               title: o.title||"",
                state: o.ended? "done" : (o.started||n2? "live":"none") });
   }
   return out.sort(function(a,b){ return String(b.date).localeCompare(String(a.date)); });
@@ -2733,7 +2740,8 @@ function viewSessionLog(){
     h += '<button class="item" data-act="openSes" data-g="'+x.gid+'" data-d="'+x.date+'">'+
       '<span class="av'+(x.abs?" b":(x.state==="done"?" g":" w"))+'">'+
         esc(DAYS[dowOf(x.date)].slice(0,3))+'</span>'+
-      '<span class="tx"><b>'+esc(x.g.name)+'</b><small>'+fmtD(x.date)+' · '+
+      '<span class="tx"><b>'+(x.title? esc(x.title) : esc(x.g.name))+'</b><small>'+
+        (x.title? esc(x.g.name)+' · ' : '')+fmtD(x.date)+' · '+
         'حضر '+ar(x.pres+x.late)+' من '+ar(x.n)+
         (x.abs? ' · غاب '+ar(x.abs) : '')+
         (x.late? ' · متأخر '+ar(x.late) : '')+'</small></span>'+
@@ -4372,6 +4380,109 @@ function modalSes(gid, d, mk, w){
   $("#modal").dataset.d = d||"";
 }
 
+/* ============================================================
+   فحص سلامة الربط
+   بيدوّر على البيانات اليتيمة: حاجة بتشير لمجموعة أو طالب
+   اتحذفوا. البيانات دي بتظهر في شاشات بأسماء فاضية وبتلخبط
+   الإحصائيات، فالأحسن نلاقيها ونصلّحها.
+   ============================================================ */
+function healthCheck(){
+  var gIds = {}, sIds = {}, eIds = {};
+  DB.groups.forEach(function(g){ gIds[g.id]=1; });
+  DB.students.forEach(function(x){ sIds[x.id]=1; });
+  DB.exams.forEach(function(e){ eIds[e.id]=1; });
+  var out = [];
+  function add(what, n2, fix){ if(n2) out.push({ what:what, n:n2, fix:fix }); }
+
+  var badSes = Object.keys(DB.sessions).filter(function(k){ return !gIds[k.split("|")[0]]; });
+  add("حصص لمجموعات محذوفة", badSes.length, function(){
+    badSes.forEach(function(k){ delete DB.sessions[k]; }); });
+
+  var badEx = DB.exams.filter(function(e){ return !gIds[e.gid]; });
+  add("امتحانات لمجموعات محذوفة", badEx.length, function(){
+    DB.exams = DB.exams.filter(function(e){ return gIds[e.gid]; }); });
+
+  var badTk = DB.tasks.filter(function(t){ return !gIds[t.gid]; });
+  add("واجبات لمجموعات محذوفة", badTk.length, function(){
+    DB.tasks = DB.tasks.filter(function(t){ return gIds[t.gid]; }); });
+
+  var badPay = DB.pays.filter(function(p){ return !sIds[p.sid] || !gIds[p.gid]; });
+  add("دفعات لطلاب أو مجموعات محذوفة", badPay.length, function(){
+    DB.pays = DB.pays.filter(function(p){ return sIds[p.sid] && gIds[p.gid]; }); });
+
+  var badDue = (DB.sesDue||[]).filter(function(x){ return !sIds[x.sid] || !gIds[x.gid]; });
+  add("مستحقات حصص يتيمة", badDue.length, function(){
+    DB.sesDue = (DB.sesDue||[]).filter(function(x){ return sIds[x.sid] && gIds[x.gid]; }); });
+
+  var badAtt = DB.attempts.filter(function(a){ return !eIds[a.examId] || !sIds[a.sid]; });
+  add("محاولات امتحان يتيمة", badAtt.length, function(){
+    DB.attempts = DB.attempts.filter(function(a){ return eIds[a.examId] && sIds[a.sid]; }); });
+
+  /* درجات وحضور وواجبات لطلاب محذوفين */
+  var ghostMarks = 0;
+  DB.exams.forEach(function(e){
+    Object.keys(e.marks||{}).forEach(function(sid){ if(!sIds[sid]) ghostMarks++; }); });
+  add("درجات لطلاب محذوفين", ghostMarks, function(){
+    DB.exams.forEach(function(e){
+      Object.keys(e.marks||{}).forEach(function(sid){ if(!sIds[sid]) delete e.marks[sid]; }); }); });
+
+  var ghostAtt = 0;
+  Object.keys(DB.sessions).forEach(function(k){
+    Object.keys(DB.sessions[k].att||{}).forEach(function(sid){ if(!sIds[sid]) ghostAtt++; }); });
+  add("حضور لطلاب محذوفين", ghostAtt, function(){
+    Object.keys(DB.sessions).forEach(function(k){
+      Object.keys(DB.sessions[k].att||{}).forEach(function(sid){
+        if(!sIds[sid]) delete DB.sessions[k].att[sid]; }); }); });
+
+  var ghostTk = 0;
+  DB.tasks.forEach(function(t){
+    Object.keys(t.done||{}).forEach(function(sid){ if(!sIds[sid]) ghostTk++; }); });
+  add("واجبات لطلاب محذوفين", ghostTk, function(){
+    DB.tasks.forEach(function(t){
+      Object.keys(t.done||{}).forEach(function(sid){ if(!sIds[sid]) delete t.done[sid]; }); }); });
+
+  var badFam = DB.students.filter(function(x){
+    return x.famId && !DB.families.some(function(f){ return f.id===x.famId; }); });
+  add("طلاب مربوطين بأسر محذوفة", badFam.length, function(){
+    badFam.forEach(function(x){ delete x.famId; }); });
+
+  var badGrp = 0;
+  DB.students.forEach(function(x){
+    (x.groups||[]).forEach(function(g){ if(!gIds[g]) badGrp++; }); });
+  add("طلاب في مجموعات محذوفة", badGrp, function(){
+    DB.students.forEach(function(x){
+      x.groups = (x.groups||[]).filter(function(g){ return gIds[g]; }); }); });
+
+  return out;
+}
+function modalHealth(){
+  var issues = healthCheck();
+  var total = issues.reduce(function(a,x){ return a+x.n; }, 0);
+  openModal(mh("فحص سلامة البيانات")+'<div class="mb">'+
+    (total
+      ? '<div class="note warn" style="margin-bottom:11px">'+
+        'لقينا <b>'+ar(total)+'</b> بيان يتيم — بيشير لمجموعة أو طالب اتحذفوا. '+
+        'البيانات دي بتظهر بأسماء فاضية وبتلخبط الإحصائيات.</div>'+
+        '<div style="border:1px solid var(--line);border-radius:11px;overflow:hidden">'+
+        issues.map(function(x){
+          return '<div class="item" style="cursor:default"><span class="av b">!</span>'+
+            '<span class="tx"><b>'+esc(x.what)+'</b></span>'+
+            '<span class="tag bad">'+ar(x.n)+'</span></div>';
+        }).join("")+'</div>'+
+        '<button class="btn block" data-act="healthFix" style="margin-top:11px">'+
+          '↻ نظّف البيانات دي</button>'
+      : '<div class="note ok"><div style="font-size:32px;text-align:center">✓</div>'+
+        '<b>كل البيانات مترابطة سليم</b><br>'+
+        'مفيش أي بيان يتيم — كل حصة ودرجة وواجب ودفعة مربوطين بمجموعة وطالب موجودين.</div>')+
+    '<div class="sep"></div>'+
+    '<div class="note"><b>الأرقام دلوقتي:</b><br>'+
+      ar(DB.groups.length)+' مجموعة · '+ar(activeStudents().length)+' طالب · '+
+      ar(Object.keys(DB.sessions).length)+' حصة · '+ar(DB.exams.length)+' امتحان · '+
+      ar(DB.tasks.length)+' واجب · '+ar(DB.pays.length)+' دفعة</div>'+
+    '</div>'+
+    '<div class="mf"><button class="btn ghost" data-act="close">إغلاق</button></div>');
+}
+
 /* --- الإعدادات --- */
 function modalSettings(){
   openModal(mh("الإعدادات")+'<div class="mb">'+
@@ -5120,6 +5231,17 @@ var ACTS = {
     toast("اتحذفت");
   },
   cloud: function(){ modalCloud(); },
+  health: function(){ modalHealth(); },
+  healthFix: function(){
+    var issues = healthCheck();
+    var total = issues.reduce(function(a,x){ return a+x.n; }, 0);
+    if(!total) return;
+    if(!confirm("تنظيف "+total+" بيان يتيم؟\n\n"+
+      "دي بيانات بتشير لمجموعات أو طلاب اتحذفوا خلاص.")) return;
+    issues.forEach(function(x){ try{ x.fix(); }catch(e){} });
+    saveSync(); closeModal(); render();
+    toast("اتنظّف "+ar(total)+" بيان");
+  },
   /* ============================================================
      تحديث قسري — بيمسح كل نسخة مخزّنة ويعيد التحميل من السيرفر.
      البيانات مش بتتلمس، ده بيمسح ملفات البرنامج بس.
@@ -5174,13 +5296,34 @@ var ACTS = {
   delGroup: function(el){
     var g = groupById(el.dataset.g); if(!g) return;
     var n = groupStudents(g.id).length;
+    var nEx = DB.exams.filter(function(e){ return e.gid===g.id; }).length;
+    var nTk = DB.tasks.filter(function(t){ return t.gid===g.id; }).length;
+    var nSes = Object.keys(DB.sessions).filter(function(k){ return k.split("|")[0]===g.id; }).length;
     if(!confirm("حذف مجموعة «"+g.name+"»؟\n\n"+
       (n? n+" طالب هيخرجوا منها (مش هيتحذفوا).\n" : "")+
-      "دفعاتها وحصصها هتتحذف. مفيش تراجع.")) return;
+      "هيتحذف معاها:\n"+
+      (nSes? "· "+nSes+" حصة بحضورها\n":"")+
+      (nEx?  "· "+nEx+" امتحان بدرجاته\n":"")+
+      (nTk?  "· "+nTk+" واجب\n":"")+
+      "· دفعاتها ومستحقاتها\n\nمفيش تراجع.")) return;
+    /* ============================================================
+       الحذف لازم يشيل كل اللي متعلّق بالمجموعة — وإلا بتفضل بيانات
+       يتيمة (امتحانات وواجبات لمجموعة مش موجودة) وتظهر في شاشات
+       تانية بأسماء فاضية.
+       ============================================================ */
     DB.students.forEach(function(s){
       s.groups = (s.groups||[]).filter(function(x){ return x!==g.id; }); });
-    DB.pays = DB.pays.filter(function(p){ return p.gid!==g.id; });
+    DB.pays   = DB.pays.filter(function(p){ return p.gid!==g.id; });
+    DB.sesDue = (DB.sesDue||[]).filter(function(x){ return x.gid!==g.id; });
     Object.keys(DB.sessions).forEach(function(k){ if(k.split("|")[0]===g.id) delete DB.sessions[k]; });
+    /* الامتحانات ومحاولاتها */
+    var exIds = DB.exams.filter(function(e){ return e.gid===g.id; }).map(function(e){ return e.id; });
+    DB.exams    = DB.exams.filter(function(e){ return e.gid!==g.id; });
+    DB.attempts = DB.attempts.filter(function(a){ return exIds.indexOf(a.examId)<0; });
+    /* الواجبات */
+    DB.tasks = DB.tasks.filter(function(t){ return t.gid!==g.id; });
+    /* الموارد */
+    DB.res = (DB.res||[]).filter(function(r){ return r.gid!==g.id; });
     DB.groups = DB.groups.filter(function(x){ return x.id!==g.id; });
     save(); closeModal(); UI.sub=null; UI.tab="groups"; render(); toast("اتحذفت");
   },
@@ -5196,10 +5339,26 @@ var ACTS = {
   backStuds: function(){ UI.sub = null; UI.tab = "studs"; render(); },
   delStu: function(el){
     var s = studentById(el.dataset.s); if(!s) return;
-    if(!confirm("حذف الطالب «"+s.name+"»؟\n\nدفعاته وحضوره هيتحذفوا. مفيش تراجع.")) return;
-    DB.pays = DB.pays.filter(function(p){ return p.sid!==s.id; });
+    var nEx = DB.exams.filter(function(e){ return (e.marks||{})[s.id]!==undefined; }).length;
+    var nPay = DB.pays.filter(function(p){ return p.sid===s.id; }).length;
+    if(!confirm("حذف الطالب «"+s.name+"»؟\n\nهيتحذف معاه:\n"+
+      (nPay? "· "+nPay+" دفعة\n":"")+
+      (nEx?  "· درجاته في "+nEx+" امتحان\n":"")+
+      "· حضوره وواجباته ومحاولاته\n\n"+
+      "لو عايز تحتفظ ببياناته، استخدم <الأرشفة> بدل الحذف.\n\nمفيش تراجع.")) return;
+    /* كل أثر للطالب لازم يتشال — وإلا درجاته تفضل في الامتحانات
+       وتلخبط المتوسطات وعدد الناجحين. */
+    DB.pays   = DB.pays.filter(function(p){ return p.sid!==s.id; });
+    DB.sesDue = (DB.sesDue||[]).filter(function(x){ return x.sid!==s.id; });
     Object.keys(DB.sessions).forEach(function(k){
       if(DB.sessions[k].att) delete DB.sessions[k].att[s.id]; });
+    DB.exams.forEach(function(e){
+      if(e.marks) delete e.marks[s.id];
+    });
+    DB.attempts = DB.attempts.filter(function(a){ return a.sid!==s.id; });
+    DB.tasks.forEach(function(t){ if(t.done) delete t.done[s.id]; });
+    DB.sales = (DB.sales||[]).filter(function(x){ return x.sid!==s.id; });
+    DB.notices = (DB.notices||[]).filter(function(m){ return m.sid!==s.id; });
     DB.students = DB.students.filter(function(x){ return x.id!==s.id; });
     save(); closeModal(); UI.sub=null; UI.tab="studs"; render(); toast("اتحذف");
   },
