@@ -7,14 +7,14 @@
 <!-- ============================================================
      تثبيت البرنامج كتطبيق على الموبايل وسطح المكتب
      ============================================================ -->
-<meta name="theme-color" content="#14202B">
+<meta name="theme-color" content="#014A59">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="دروسي">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="description" content="إدارة الدروس الخصوصية — المجموعات والحضور والتحصيل">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%231F4FD8'/%3E%3Cg stroke='%23ffffff' stroke-opacity='.22' stroke-width='2'%3E%3Cpath d='M0 128h512M0 256h512M0 384h512M128 0v512M256 0v512M384 0v512'/%3E%3C/g%3E%3Ctext x='256' y='350' font-family='Georgia,serif' font-size='260' font-weight='bold' fill='%23ffffff' text-anchor='middle'%3E%CF%80%3C/text%3E%3C/svg%3E">
-<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%231F4FD8'/%3E%3Cg stroke='%23ffffff' stroke-opacity='.22' stroke-width='2'%3E%3Cpath d='M0 128h512M0 256h512M0 384h512M128 0v512M256 0v512M384 0v512'/%3E%3C/g%3E%3Ctext x='256' y='350' font-family='Georgia,serif' font-size='260' font-weight='bold' fill='%23ffffff' text-anchor='middle'%3E%CF%80%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%23014A59'/%3E%3Cg stroke='%23ffffff' stroke-opacity='.18' stroke-width='2'%3E%3Cpath d='M0 128h512M0 256h512M0 384h512M128 0v512M256 0v512M384 0v512'/%3E%3C/g%3E%3Ctext x='256' y='350' font-family='Georgia,serif' font-size='260' font-weight='bold' fill='%23ffffff' text-anchor='middle'%3E%CF%80%3C/text%3E%3C/svg%3E">
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%23014A59'/%3E%3Cg stroke='%23ffffff' stroke-opacity='.18' stroke-width='2'%3E%3Cpath d='M0 128h512M0 256h512M0 384h512M128 0v512M256 0v512M384 0v512'/%3E%3C/g%3E%3Ctext x='256' y='350' font-family='Georgia,serif' font-size='260' font-weight='bold' fill='%23ffffff' text-anchor='middle'%3E%CF%80%3C/text%3E%3C/svg%3E">
 <link rel="manifest" id="mf">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -27,20 +27,22 @@
    خلفية وبتدي إحساس الدقة والحساب.
    ============================================================ */
 :root{
-  --paper:#F2F5FA; --card:#FFFFFF; --ink:#0E1A2B; --line:#DDE4EF; --line2:#EDF1F7;
-  --mut:#63748C; --grid:#DDE6F4;
-  --seal:#1F4FD8; --seal-l:#E6EDFF;        /* أزرق المخططات */
-  --ok:#0E9B57; --ok-l:#E2F5EC;            /* الفلوس والمدفوع */
-  --warn:#C98A00; --warn-l:#FDF4E0;
-  --bad:#CC3B3B; --bad-l:#FCEBEB;
+  /* الباليتة مستخرجة من صور التطبيق نفسه:
+     #014A59 غامق · #0E877E فاتح · برتقالي للأزرار المهمة */
+  --paper:#F6F7F5; --card:#FFFFFF; --ink:#014A59; --line:#DCE6E4; --line2:#EDF2F1;
+  --mut:#6A7F80; --grid:#E2ECEA;
+  --seal:#0E877E; --seal-l:#E3F3F1;        /* الأخضر المزرق */
+  --ok:#0E877E; --ok-l:#E3F3F1;
+  --warn:#E8930C; --warn-l:#FDF3E3;        /* البرتقالي */
+  --bad:#D2504A; --bad-l:#FBECEB;
   --r:14px;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;padding:0}
 body{
   background:
-    linear-gradient(var(--grid) 1px, transparent 1px) 0 0/22px 22px,
-    linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0/22px 22px,
+    linear-gradient(var(--grid) 1px, transparent 1px) 0 0/26px 26px,
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0/26px 26px,
     var(--paper);
   color:var(--ink);font-family:Tajawal,system-ui,sans-serif;font-size:15px;line-height:1.6;
   -webkit-text-size-adjust:100%}
@@ -208,6 +210,14 @@ th{background:var(--paper);font-weight:800;font-size:12px;color:var(--mut);font-
        font-weight:600;opacity:0;pointer-events:none;transition:.22s;max-width:90vw;text-align:center}
 .toast.on{opacity:1;bottom:88px}
 
+/* زرار الإضافة العائم — برتقالي زي المرجع */
+.fab{position:fixed;inset-inline-start:16px;bottom:calc(78px + env(safe-area-inset-bottom));
+     z-index:35;width:56px;height:56px;border-radius:18px;border:0;background:var(--warn);
+     color:#fff;font-size:26px;font-weight:300;cursor:pointer;line-height:1;
+     box-shadow:0 6px 18px rgba(232,147,12,.35)}
+.fab:hover{filter:brightness(1.06)}
+.fab:active{transform:translateY(1px)}
+
 /* ---------- البوابة ---------- */
 .gate{min-height:calc(100dvh - 120px);display:flex;align-items:flex-start;justify-content:center}
 .gwrap{width:100%;max-width:400px}
@@ -299,7 +309,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "2.0";
+var APP_VER = "2.2";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -312,6 +322,7 @@ function blank(){
     groups:[], students:[], sessions:{}, pays:[],
     bookings:[], notices:[], sesDue:[],
     years:[],       /* السنوات الدراسية */
+    lock:{ on:false, pin:"", bio:false },   /* قفل البرنامج */
     res:[],         /* موارد المجموعات — روابط وملفات */
     curYear:"",
     /* الوحدات الجديدة */
@@ -1026,6 +1037,8 @@ var MORE = [
   { id:"book",  name:"الحجز",                d:"طلبات التسجيل الجديدة من صفحة الحجز",            i:"✉" },
   { id:"comm",  name:"التواصل مع الطلاب",    d:"تعليمات لمجموعة أو لطالب أو للكل",               i:"◈" },
   { id:"cert",  name:"شهادات التقدير",       d:"شهادات للمتفوقين والملتزمين — جاهزة للطباعة",     i:"★" },
+  { id:"sesh",  name:"سجل الحصص",             d:"كل حصة اترصدت — تاريخها وحضورها وغيابها",         i:"◫" },
+  { id:"lock",  name:"قفل البرنامج",           d:"بصمة أو رقم سري يتقفل بيه البرنامج",              i:"🔒" },
   { id:"honor", name:"لوحة الشرف",           d:"ترتيب الطلاب على الدرجات والحضور والواجبات",      i:"♛" },
   { id:"qr",    name:"أكواد الطلاب و QR",     d:"كارت لكل طالب · وماسح يسجّل الحضور في ثانية",     i:"▣" },
   { id:"years", name:"السنوات الدراسية",      d:"سنة وفصول · وأرشفة سنة وبدء جديدة",              i:"◷" },
@@ -1033,6 +1046,14 @@ var MORE = [
   { id:"rep",   name:"التقارير",             d:"أداء المجموعات والدخل والحضور",                   i:"▦" }
 ];
 function render(){
+  /* البرنامج مقفول؟ شاشة القفل قبل أي حاجة */
+  if(UI.locked && DB.lock && DB.lock.on && DB.lock.pin){
+    $("#nav").innerHTML = ""; $("#nav").style.display = "none";
+    var old0 = document.getElementById("fab"); if(old0) old0.remove();
+    $("#view").innerHTML = lockScreenHTML();
+    var pi = document.getElementById("ul_pin"); if(pi) setTimeout(function(){ pi.focus(); },80);
+    return;
+  }
   /* مش داخل؟ نعرض البوابة */
   if(FB.role!=="teacher" && FB.role!=="student"){
     $("#nav").innerHTML = ""; $("#nav").style.display = "none";
@@ -1074,8 +1095,26 @@ function render(){
   else if(UI.tab==="qr")     h = viewQR();
   else if(UI.tab==="years")  h = viewYears();
   else if(UI.tab==="arch")   h = viewArchive();
+  else if(UI.tab==="sesh")   h = viewSessionLog();
+  else if(UI.tab==="lock")   h = viewLock();
   else                       h = viewReports();
   $("#view").innerHTML = h;
+  /* الزرار العائم — بيضيف حاجة حسب الشاشة اللي انت فيها */
+  var FAB = { groups:["newGroup","مجموعة"], studs:["newStu","طالب"],
+              exams:["newExam","امتحان"], tasks:["newTask","مهمة"],
+              fams:["newFam","أسرة"], books:["newBook","مذكرة"],
+              remind:["newRem","تذكير"] };
+  var old = document.getElementById("fab");
+  if(old) old.remove();
+  var f = (!UI.sub) ? FAB[UI.tab] : null;
+  if(f){
+    var btn = document.createElement("button");
+    btn.id = "fab"; btn.className = "fab";
+    btn.setAttribute("data-act", f[0]);
+    btn.title = "إضافة "+f[1];
+    btn.textContent = "+";
+    document.body.appendChild(btn);
+  }
   $("#hSub").textContent = (DB.meta.name ? (DB.meta.name + (DB.meta.subject? " · "+DB.meta.subject : ""))
                                         : "إدارة الدروس الخصوصية") + "  ·  v" + APP_VER;
   window.scrollTo(0,0);
@@ -1373,6 +1412,34 @@ function viewStudent(sid){
       '</div></div></div>';
   });
 
+  /* سجل حضور الطالب — كل حصة وحالته فيها */
+  var hist = [];
+  for(var k in DB.sessions){
+    var p2 = k.split("|");
+    var v2 = (DB.sessions[k].att||{})[sid];
+    if(v2===undefined) continue;
+    var g2 = groupById(p2[0]);
+    hist.push({ date:p2[1], g:g2, v:v2 });
+  }
+  hist.sort(function(a,b){ return String(b.date).localeCompare(String(a.date)); });
+  if(hist.length){
+    var aAll = attStats(sid, null);
+    h += '<div class="card"><div class="hd"><h3>سجل الحضور</h3>'+
+      '<span class="tag '+(aAll.rate>=80?"ok":(aAll.rate>=60?"warn":"bad"))+'">'+
+      ar(aAll.rate)+'٪</span></div><div class="bd flush">';
+    hist.slice(0,20).forEach(function(x){
+      var L2 = x.v==="P"? ["حاضر","g","✓"] : (x.v==="L"? ["متأخر","w","⏱"] : ["غايب","b","✕"]);
+      h += '<div class="item" style="cursor:default">'+
+        '<span class="av '+L2[1]+'">'+L2[2]+'</span>'+
+        '<span class="tx"><b>'+fmtD(x.date)+'</b><small>'+
+          esc(x.g?x.g.name:"—")+' · '+esc(DAYS[dowOf(x.date)])+'</small></span>'+
+        '<span class="tag '+(x.v==="P"?"ok":(x.v==="L"?"warn":"bad"))+'">'+L2[0]+'</span></div>';
+    });
+    if(hist.length>20) h += '<div class="item mut" style="cursor:default;justify-content:center">'+
+      '<span class="tx" style="text-align:center">…وكمان '+ar(hist.length-20)+' حصة</span></div>';
+    h += '</div></div>';
+  }
+
   /* سجل الدفعات */
   var mine = DB.pays.filter(function(p){ return p.sid===sid; })
     .sort(function(a,b){ return (b.at||0)-(a.at||0); });
@@ -1661,6 +1728,117 @@ function viewCerts(){
       '<span class="tag">★ شهادة</span></button>';
   });
   return h+'</div></div>';
+}
+
+/* ============================================================
+   سجل الحصص — كل حصة اترصدت
+   ============================================================ */
+function allSessions(){
+  var out = [];
+  for(var k in DB.sessions){
+    var p = k.split("|");
+    var g = groupById(p[0]);
+    if(!g) continue;
+    var o = DB.sessions[k], att = o.att||{};
+    var pres=0, abs=0, late=0, n2=0;
+    for(var sid in att){
+      n2++;
+      if(att[sid]==="P") pres++;
+      else if(att[sid]==="A") abs++;
+      else if(att[sid]==="L") late++;
+    }
+    out.push({ gid:p[0], date:p[1], g:g, n:n2, pres:pres, abs:abs, late:late,
+               state: o.ended? "done" : (o.started||n2? "live":"none") });
+  }
+  return out.sort(function(a,b){ return String(b.date).localeCompare(String(a.date)); });
+}
+function viewSessionLog(){
+  var gid = UI.shG || "";
+  var all = allSessions();
+  var list = gid ? all.filter(function(x){ return x.gid===gid; }) : all;
+  var h = pageHd("سجل الحصص", ar(all.length)+" حصة اترصدت",
+    '<button class="btn ghost sm" data-act="print">⎙ طباعة</button>');
+  if(DB.groups.length>1){
+    h += '<div class="chips">'+
+      '<button class="'+(!gid?"on":"")+'" data-act="shG" data-g="">الكل <small>'+ar(all.length)+'</small></button>'+
+      DB.groups.map(function(g){
+        var n3 = all.filter(function(x){ return x.gid===g.id; }).length;
+        return '<button class="'+(gid===g.id?"on":"")+'" data-act="shG" data-g="'+g.id+'">'+
+          esc(g.name)+' <small>'+ar(n3)+'</small></button>';
+      }).join("")+'</div>';
+  }
+  if(!list.length)
+    return h+'<div class="card"><div class="bd"><div class="empty"><div class="big">◫</div>'+
+      '<b>مفيش حصص مرصودة</b><p>ارصد حضور حصة وهتلاقيها هنا.</p></div></div></div>';
+  h += '<div class="card"><div class="bd flush">';
+  list.slice(0,80).forEach(function(x){
+    h += '<button class="item" data-act="openSes" data-g="'+x.gid+'" data-d="'+x.date+'">'+
+      '<span class="av'+(x.abs?" b":(x.state==="done"?" g":" w"))+'">'+
+        esc(DAYS[dowOf(x.date)].slice(0,3))+'</span>'+
+      '<span class="tx"><b>'+esc(x.g.name)+'</b><small>'+fmtD(x.date)+' · '+
+        'حضر '+ar(x.pres+x.late)+' من '+ar(x.n)+
+        (x.abs? ' · غاب '+ar(x.abs) : '')+
+        (x.late? ' · متأخر '+ar(x.late) : '')+'</small></span>'+
+      (x.state==="done"? '<span class="tag ok">خلصت</span>'
+        : (x.state==="live"? '<span class="tag warn">جارية</span>':''))+
+      '<span class="chev">‹</span></button>';
+  });
+  return h+'</div></div>';
+}
+
+/* ============================================================
+   قفل البرنامج
+   بصمة لو الجهاز يدعمها، أو رقم سري. القفل ده يحمي الجهاز نفسه —
+   مش بديل عن كلمة سر الحساب.
+   ============================================================ */
+function viewLock(){
+  DB.lock = DB.lock || { on:false, pin:"", bio:false };
+  var L = DB.lock;
+  var h = pageHd("قفل البرنامج", L.on? "القفل شغّال" : "القفل مقفول",
+    "");
+  h += '<div class="note" style="margin-bottom:12px">لما القفل يشتغل، البرنامج هيطلب '+
+    'الرقم السري أو البصمة كل ما تفتحه. ده بيحمي بياناتك لو حد مسك موبايلك.</div>';
+  h += '<div class="card"><div class="bd">'+
+    '<label style="display:flex;align-items:center;gap:10px;padding:8px 0;cursor:pointer">'+
+      '<input type="checkbox" id="lk_on"'+(L.on?" checked":"")+' data-act="lkOn" '+
+      'style="width:20px;height:20px">'+
+      '<span style="flex:1"><b style="font-weight:700">تشغيل القفل</b>'+
+      '<br><small class="mut">يطلب الرقم السري أول ما تفتح البرنامج</small></span>'+
+    '</label>'+
+    '<div class="sep"></div>'+
+    '<label class="f"><span>الرقم السري (٤ أرقام على الأقل)</span>'+
+      '<input type="password" id="lk_pin" inputmode="numeric" maxlength="8" '+
+      'value="'+esc(L.pin||"")+'" style="direction:ltr;text-align:center;letter-spacing:.4em;font-size:20px"></label>'+
+    '<label style="display:flex;align-items:center;gap:10px;padding:8px 0;cursor:pointer">'+
+      '<input type="checkbox" id="lk_bio"'+(L.bio?" checked":"")+' data-act="lkBio" '+
+      'style="width:20px;height:20px">'+
+      '<span style="flex:1"><b style="font-weight:700">استخدم البصمة كمان</b>'+
+      '<br><small class="mut">لو جهازك بيدعمها — والرقم السري بيفضل بديل</small></span>'+
+    '</label>'+
+    '<button class="btn block" data-act="lkSave" style="margin-top:10px">حفظ</button>'+
+    '</div></div>';
+  if(L.on && L.pin)
+    h += '<div class="note warn"><b>مهم:</b> لو نسيت الرقم السري مش هتقدر تفتح البرنامج على الجهاز ده. '+
+      'خد نسخة احتياطية من بياناتك.</div>';
+  return h;
+}
+/* شاشة القفل نفسها */
+function lockScreenHTML(){
+  return '<div class="gate"><div class="gwrap">'+
+    '<div class="center" style="padding:40px 0 22px">'+
+      '<div class="glogo">π</div>'+
+      '<h1 style="font-size:24px;margin-top:12px">البرنامج مقفول</h1>'+
+      '<div class="mut" style="font-size:13px;margin-top:4px">اكتب الرقم السري عشان تفتح</div>'+
+    '</div>'+
+    '<div class="card"><div class="bd">'+
+      '<label class="f"><span>الرقم السري</span>'+
+        '<input type="password" id="ul_pin" inputmode="numeric" maxlength="8" autofocus '+
+        'style="direction:ltr;text-align:center;letter-spacing:.4em;font-size:22px"></label>'+
+      (UI.lockMsg? '<div class="note bad" style="margin-bottom:10px">'+esc(UI.lockMsg)+'</div>':'')+
+      '<button class="btn block" data-act="unlock">افتح</button>'+
+      ((DB.lock&&DB.lock.bio&&window.PublicKeyCredential)
+        ? '<button class="btn ghost block" data-act="unlockBio" style="margin-top:8px">👆 استخدم البصمة</button>':'')+
+    '</div></div></div></div>';
 }
 
 /* ---------- لوحة الشرف ---------- */
@@ -3023,6 +3201,45 @@ var ACTS = {
     if(!d.rest){ toast("الطالب سديد"); return; }
     waOpen(contactOf(s), waMsg("due", s, { amount:d.rest, month:MONTHS[new Date().getMonth()] }));
   },
+  /* ---------- سجل الحصص ---------- */
+  shG: function(el){ UI.shG = el.dataset.g||""; render(); },
+  /* ---------- القفل ---------- */
+  lkOn:  function(){},
+  lkBio: function(){},
+  lkSave: function(){
+    DB.lock = DB.lock || {};
+    var on  = !!(document.getElementById("lk_on") && document.getElementById("lk_on").checked);
+    var pin = String(val("lk_pin")||"").replace(/\D/g,"");
+    var bio = !!(document.getElementById("lk_bio") && document.getElementById("lk_bio").checked);
+    if(on && pin.length<4){ toast("الرقم السري ٤ أرقام على الأقل"); return; }
+    if(on && !confirm("هيتقفل البرنامج بالرقم ("+pin+").\n\n"+
+      "لو نسيته مش هتقدر تفتح البرنامج على الجهاز ده. متأكد؟")) return;
+    DB.lock = { on:on, pin:pin, bio:bio };
+    saveSync(); render();
+    toast(on? "القفل اشتغل" : "القفل اتقفل");
+  },
+  unlock: function(){
+    var p = String(val("ul_pin")||"").replace(/\D/g,"");
+    if(p === (DB.lock&&DB.lock.pin)){
+      UI.locked = false; UI.lockMsg = ""; render();
+    }else{
+      UI.lockMsg = "الرقم غلط";
+      var e = document.getElementById("ul_pin"); if(e) e.value="";
+      render();
+    }
+  },
+  unlockBio: function(){
+    /* البصمة عبر WebAuthn — لو فشلت الرقم السري بيفضل متاح */
+    if(!window.PublicKeyCredential){ toast("جهازك مايدعمش البصمة"); return; }
+    navigator.credentials.get({
+      publicKey:{
+        challenge: new Uint8Array(32),
+        userVerification: "required",
+        timeout: 30000
+      }
+    }).then(function(){ UI.locked=false; UI.lockMsg=""; render(); })
+      .catch(function(){ toast("مقدرتش أتحقق — استخدم الرقم السري"); });
+  },
   /* ---------- الأكواد و QR ---------- */
   qrGen: function(){
     var n2 = ensureStuCodes();
@@ -3734,7 +3951,10 @@ window.addEventListener("beforeinstallprompt", function(e){
 });
 window.addEventListener("appinstalled", function(){ INSTALL=null; });
 
-load(); restoreSession();
+load();
+/* لو القفل شغّال، البرنامج يفتح مقفول */
+if(DB.lock && DB.lock.on && DB.lock.pin) UI.locked = true;
+restoreSession();
 </script>
 </body>
 </html>
