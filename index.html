@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "3.6";
+var APP_VER = "4.0";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -473,6 +473,7 @@ function blank(){
     years:[],       /* السنوات الدراسية */
     lock:{ on:false, pin:"", bio:false },   /* قفل البرنامج */
     res:[],         /* موارد المجموعات — روابط وملفات */
+    attempts:[],    /* محاولات الامتحانات الإلكترونية */
     curYear:"",
     /* الوحدات الجديدة */
     families:[],      /* الأسر — ربط الإخوة ودفعة واحدة */
@@ -495,7 +496,7 @@ function load(){
   if(!DB.meta) DB = blank();
   ["groups","students","pays","bookings","notices",
    "families","exams","tasks","books","sales","reminders","sesDue",
-   "years","res"].forEach(function(k){
+   "years","res","attempts"].forEach(function(k){
     if(!Array.isArray(DB[k])) DB[k] = []; });
   if(!DB.sessions) DB.sessions = {};
   if(!DB.seq) DB.seq = 1;
@@ -843,6 +844,189 @@ function genFamCode(){
     if(!DB.families.some(function(f){ return f.code===c; })) return c;
   }
   return "F"+(DB.seq++);
+}
+
+/* ============================================================
+   نظام الامتحانات الإلكترونية
+   بيشتغل جنب نظام الدرجات القديم من غير ما يكسره:
+   • امتحان قديم = { title, gid, date, max, marks:{} }   ← رصد يدوي
+   • امتحان إلكتروني = نفس الحقول + { qs:[], online:1 }  ← أسئلة ومحاولات
+   الدالة isOnlineExam بتفرّق بينهم.
+   ============================================================ */
+var Q_TYPES = [
+  { id:"mcq",   name:"اختيار من متعدد", auto:true },
+  { id:"tf",    name:"صح أو خطأ",       auto:true },
+  { id:"text",  name:"إجابة نصية قصيرة", auto:true },
+  { id:"essay", name:"سؤال مقالي",       auto:false }
+];
+var EX_STATES = [
+  { id:"draft", name:"مسودة",  c:"" },
+  { id:"sched", name:"مجدول",  c:"warn" },
+  { id:"open",  name:"متاح",   c:"ok" },
+  { id:"ended", name:"منتهي",  c:"" },
+  { id:"closed",name:"مغلق",   c:"bad" }
+];
+var SHOW_MODES = [
+  { id:"now",   name:"مباشرة بعد التسليم" },
+  { id:"after", name:"بعد اكتمال التصحيح" },
+  { id:"never", name:"لا تظهر النتيجة للطالب" }
+];
+function qTypeName(t){ for(var i=0;i<Q_TYPES.length;i++) if(Q_TYPES[i].id===t) return Q_TYPES[i].name; return t; }
+function qIsAuto(q){
+  if(!q) return false;
+  if(q.type==="essay") return false;
+  if(q.grade==="manual") return false;
+  return true;
+}
+function isOnlineExam(e){ return !!(e && e.online); }
+
+/* حالة الامتحان الفعلية — بتتحسب من التواريخ مش من الحقل بس */
+function examState(e){
+  if(!e) return "draft";
+  if(e.status==="draft" || e.status==="closed") return e.status;
+  var now = new Date().toISOString().slice(0,16).replace("T"," ");
+  var from = (e.from||"").replace("T"," ");
+  var to   = (e.to||"").replace("T"," ");
+  if(from && now < from) return "sched";
+  if(to && now > to)     return "ended";
+  return "open";
+}
+function examStateName(st){ for(var i=0;i<EX_STATES.length;i++) if(EX_STATES[i].id===st) return EX_STATES[i]; return EX_STATES[0]; }
+/* هل الطالب يقدر يدخل الامتحان دلوقتي؟ */
+function examOpenFor(e, sid){
+  if(examState(e)!=="open") return { ok:false, why:"الامتحان مش متاح دلوقتي" };
+  var g = groupById(e.gid);
+  if(!g) return { ok:false, why:"المجموعة مش موجودة" };
+  var s = studentById(sid);
+  if(!s || (s.groups||[]).indexOf(e.gid)<0)
+    return { ok:false, why:"الامتحان ده مش لمجموعتك" };
+  var mine = attemptsOf(e.id, sid);
+  var done = mine.filter(function(a){ return a.submittedAt; }).length;
+  var tries = Math.max(1, num(e.tries,1));
+  var live = mine.filter(function(a){ return !a.submittedAt; })[0];
+  if(live) return { ok:true, resume:live };
+  if(done >= tries) return { ok:false, why:"خلصت محاولاتك ("+ar(tries)+")" };
+  return { ok:true };
+}
+
+/* ---------- المحاولات ---------- */
+function attemptById(id){ for(var i=0;i<DB.attempts.length;i++) if(DB.attempts[i].id===id) return DB.attempts[i]; return null; }
+function attemptsOf(examId, sid){
+  return DB.attempts.filter(function(a){
+    return a.examId===examId && (!sid || a.sid===sid);
+  }).sort(function(a,b){ return (a.startedAt||0)-(b.startedAt||0); });
+}
+function newAttempt(examId, sid){
+  var a = { id:uid("at"), examId:examId, sid:sid, startedAt:Date.now(),
+            submittedAt:0, answers:{}, marks:{}, notes:{},
+            auto:0, manual:0, total:0, state:"live" };
+  DB.attempts.push(a);
+  saveSync();
+  return a;
+}
+/* الوقت المتبقي بالثواني */
+function attemptLeft(a, e){
+  if(!a || !e) return 0;
+  var mins = num(e.mins,0);
+  if(!mins) return 999999;
+  var endByDuration = a.startedAt + mins*60000;
+  var endByWindow = e.to ? new Date(e.to).getTime() : Infinity;
+  return Math.max(0, Math.floor((Math.min(endByDuration, endByWindow) - Date.now())/1000));
+}
+
+/* ============================================================
+   التصحيح
+   ============================================================ */
+function normAns(v, q){
+  var t = String(v==null?"":v);
+  if(q && q.exact) return t.trim();
+  return normAr(t);
+}
+/* تصحيح سؤال واحد — بيرجّع الدرجة أو null لو محتاج تصحيح يدوي */
+function gradeQ(q, ans){
+  if(!qIsAuto(q)) return null;
+  var mk = num(q.mark,1);
+  if(ans===undefined || ans===null || ans==="") return 0;
+  if(q.type==="mcq")  return String(ans)===String(q.correct) ? mk : 0;
+  if(q.type==="tf")   return String(ans)===String(q.tf) ? mk : 0;
+  if(q.type==="text"){
+    var list = (q.texts||[]).filter(function(x){ return String(x||"").trim(); });
+    if(!list.length) return null;                 /* مفيش إجابة مرجعية → يدوي */
+    for(var i=0;i<list.length;i++)
+      if(normAns(list[i], q) === normAns(ans, q)) return mk;
+    return 0;
+  }
+  return null;
+}
+/* تصحيح المحاولة كاملة */
+function gradeAttempt(a){
+  var e = examById(a.examId);
+  if(!e) return a;
+  var auto = 0, pending = 0, manual = 0;
+  (e.qs||[]).forEach(function(q){
+    var g = gradeQ(q, (a.answers||{})[q.id]);
+    if(g===null){
+      /* يدوي: لو المدرّس صحّحه ناخد درجته، وإلا في الانتظار */
+      var m = (a.marks||{})[q.id];
+      if(m===undefined || m===null || m==="") pending++;
+      else manual += num(m,0);
+    }else{
+      auto += g;
+      a.marks = a.marks || {};
+      a.marks[q.id] = g;                          /* بنحفظ الدرجة التلقائية */
+    }
+  });
+  a.auto = auto; a.manual = manual; a.pending = pending;
+  a.total = auto + manual;
+  a.state = a.submittedAt ? (pending? "grading" : "done") : "live";
+  return a;
+}
+function examTotalMark(e){
+  if(!e) return 0;
+  if(!(e.qs||[]).length) return num(e.max,0);
+  return (e.qs||[]).reduce(function(t,q){ return t + num(q.mark,0); }, 0);
+}
+/* هل الطالب يشوف نتيجته؟ */
+function canSeeResult(e, a){
+  if(!e || !a || !a.submittedAt) return false;
+  var mode = e.showMode || "now";
+  if(mode==="never") return false;
+  if(mode==="after")  return !a.pending;
+  return true;
+}
+
+/* ---------- إحصائيات الامتحان الإلكتروني ---------- */
+function onlineStats(e){
+  var studs = groupStudents(e.gid);
+  var all = attemptsOf(e.id);
+  var byStu = {};
+  all.forEach(function(a){
+    if(!byStu[a.sid] || (a.total||0) > (byStu[a.sid].total||0)) byStu[a.sid] = a;
+  });
+  var started = Object.keys(byStu).length;
+  var sub = 0, pend = 0, scores = [], pass = 0;
+  var tot = examTotalMark(e) || 1;
+  Object.keys(byStu).forEach(function(k){
+    var a = gradeAttempt(byStu[k]);
+    if(!a.submittedAt) return;
+    sub++;
+    if(a.pending) pend++;
+    else {
+      scores.push(a.total);
+      if(a.total >= tot/2) pass++;
+    }
+  });
+  var sum = scores.reduce(function(x,y){ return x+y; }, 0);
+  return {
+    students: studs.length, started: started, submitted: sub, pending: pend,
+    done: scores.length, notStarted: studs.length - started,
+    max: scores.length? Math.max.apply(null,scores) : null,
+    min: scores.length? Math.min.apply(null,scores) : null,
+    avg: scores.length? Math.round(sum/scores.length*10)/10 : null,
+    pass: pass, fail: scores.length-pass,
+    passPct: scores.length? Math.round(pass/scores.length*100) : 0,
+    total: tot, byStu: byStu
+  };
 }
 
 /* ============================================================
@@ -1317,7 +1501,8 @@ function render(){
     document.body.classList.remove("in");
     document.getElementById("side").style.display = "none";
     closeSide();
-    $("#view").innerHTML = viewStudentPortal();
+    $("#view").innerHTML = UI.take ? viewTakeExam()
+                         : (UI.stuTab==="exams" ? viewStuExams() : viewStudentPortal());
     $("#hSub").textContent = (GATE.teacher||{}).name || DB.meta.name || "";
     window.scrollTo(0,0); return;
   }
@@ -1335,7 +1520,10 @@ function render(){
   else if(UI.tab==="more")   { UI.tab="home"; h = viewHome(); }
   else if(UI.tab==="book")   h = viewBookings();
   else if(UI.tab==="comm")   h = (UI.sub && UI.sub.c) ? viewComm(UI.sub.c) : viewComms();
-  else if(UI.tab==="exams")  h = (UI.sub && UI.sub.e) ? viewExam(UI.sub.e) : viewExams();
+  else if(UI.tab==="exams")  h = (UI.sub && UI.sub.on)   ? viewOnline(UI.sub.on)
+                               : (UI.sub && UI.sub.res)  ? viewExamResults(UI.sub.res)
+                               : (UI.sub && UI.sub.gr)   ? viewGradeStu(UI.sub.gr, UI.sub.sid)
+                               : (UI.sub && UI.sub.e)    ? viewExam(UI.sub.e) : viewExams();
   else if(UI.tab==="tasks")  h = viewTasks();
   else if(UI.tab==="fams")   h = (UI.sub && UI.sub.f) ? viewFamily(UI.sub.f) : viewFamilies();
   else if(UI.tab==="books")  h = viewBooks();
@@ -1739,7 +1927,8 @@ function viewMore(){
 function viewExams(){
   var list = DB.exams.slice().sort(function(a,b){ return String(b.date).localeCompare(String(a.date)); });
   var h = pageHd("الامتحانات والدرجات", ar(list.length)+" امتحان",
-    '<button class="btn sm" data-act="newExam">+ امتحان</button>');
+    '<button class="btn ghost sm" data-act="newExam">+ رصد درجات</button>'+
+    '<button class="btn sm" data-act="newOnline">+ امتحان إلكتروني</button>');
   if(!DB.groups.length)
     return h+'<div class="card"><div class="bd"><div class="empty"><div class="big">◔</div>'+
       '<b>اعمل مجموعة الأول</b></div></div></div>';
@@ -1749,14 +1938,27 @@ function viewExams(){
       '<button class="btn" data-act="newExam" style="margin-top:10px">+ امتحان جديد</button></div></div></div>';
   h += '<div class="card"><div class="bd flush">';
   list.forEach(function(e){
-    var g = groupById(e.gid), st = examStats(e);
-    h += '<button class="item" data-act="openExam" data-e="'+e.id+'">'+
-      '<span class="av'+(st.n?"":" w")+'">'+(st.avg!=null? ar(Math.round(st.avg)) : "—")+'</span>'+
-      '<span class="tx"><b>'+esc(e.title)+'</b><small>'+
-        esc(g?g.name:"—")+' · '+fmtD(e.date)+' · من '+ar(e.max)+
-        (st.n? ' · اترصد '+ar(st.n)+' من '+ar(st.total) : ' · لسه ماترصدش')+'</small></span>'+
-      (st.n? '<span class="tag '+(st.fail?"warn":"ok")+'">'+ar(st.pass)+' ناجح</span>' : '')+
-      '<span class="chev">‹</span></button>';
+    var g = groupById(e.gid);
+    if(isOnlineExam(e)){
+      var o = onlineStats(e), stt = examStateName(examState(e));
+      h += '<button class="item" data-act="openOnline" data-e="'+e.id+'">'+
+        '<span class="av'+(o.pending?" w":(o.submitted?" g":""))+'">◉</span>'+
+        '<span class="tx"><b>'+esc(e.title)+'</b><small>'+
+          esc(g?g.name:"—")+' · '+ar((e.qs||[]).length)+' سؤال · '+ar(examTotalMark(e))+' درجة'+
+          (o.submitted? ' · سلّم '+ar(o.submitted)+' من '+ar(o.students) : ' · لسه محدش سلّم')+
+          (o.pending? ' · '+ar(o.pending)+' محتاج تصحيح' : '')+'</small></span>'+
+        '<span class="tag '+stt.c+'">'+esc(stt.name)+'</span>'+
+        '<span class="chev">‹</span></button>';
+    }else{
+      var st = examStats(e);
+      h += '<button class="item" data-act="openExam" data-e="'+e.id+'">'+
+        '<span class="av'+(st.n?"":" w")+'">'+(st.avg!=null? ar(Math.round(st.avg)) : "—")+'</span>'+
+        '<span class="tx"><b>'+esc(e.title)+'</b><small>'+
+          esc(g?g.name:"—")+' · '+fmtD(e.date)+' · من '+ar(e.max)+
+          (st.n? ' · اترصد '+ar(st.n)+' من '+ar(st.total) : ' · لسه ماترصدش')+'</small></span>'+
+        (st.n? '<span class="tag '+(st.fail?"warn":"ok")+'">'+ar(st.pass)+' ناجح</span>' : '')+
+        '<span class="chev">‹</span></button>';
+    }
   });
   return h+'</div></div>';
 }
@@ -1795,6 +1997,291 @@ function viewExam(eid){
     '<button class="btn block" data-act="waExamAll" data-e="'+eid+'">✆ ابعت النتايج لأولياء الأمور</button>'+
     '</div></div>';
   return h;
+}
+
+/* ============================================================
+   شاشة الامتحان الإلكتروني — المدرّس
+   ============================================================ */
+function viewOnline(eid){
+  var e = examById(eid);
+  if(!e){ UI.sub=null; return viewExams(); }
+  var g = groupById(e.gid), o = onlineStats(e), stt = examStateName(examState(e));
+  var h = back("الامتحانات","backExams");
+  h += pageHd(e.title,
+    esc(g?g.name:"")+" · "+ar((e.qs||[]).length)+" سؤال · "+ar(examTotalMark(e))+" درجة",
+    '<button class="btn ghost sm" data-act="editOnline" data-e="'+eid+'">تعديل</button>'+
+    '<button class="btn ghost sm" data-act="dupExam" data-e="'+eid+'">نسخ</button>'+
+    '<button class="btn sm" data-act="examResults" data-e="'+eid+'">النتائج</button>');
+
+  h += '<div class="stats">'+
+    stat("الحالة", esc(stt.name),
+         (e.from? fmtD(e.from.slice(0,10)) : "")+(e.mins? " · "+ar(e.mins)+" د" : ""),
+         stt.c==="ok"?"money":(stt.c==="bad"?"late":"acc"))+
+    stat("بدأوا", ar(o.started), "من "+ar(o.students)+" طالب","")+
+    stat("سلّموا", ar(o.submitted), o.notStarted? ar(o.notStarted)+" ما دخلوش":"", "money")+
+    stat("محتاج تصحيح", ar(o.pending), o.pending? "أسئلة مقالية":"مفيش", o.pending?"late":"")+
+  '</div>';
+
+  /* أزرار الحالة */
+  h += '<div class="card"><div class="bd"><div class="row">'+
+    (e.status!=="open"
+      ? '<button class="btn sm" data-act="exPublish" data-e="'+eid+'">▶ انشر الامتحان</button>'
+      : '<button class="btn ghost sm" data-act="exDraft" data-e="'+eid+'">■ رجّعه مسودة</button>')+
+    '<button class="btn ghost sm" data-act="exClose" data-e="'+eid+'">قفل الامتحان</button>'+
+    '<button class="btn ghost sm" data-act="exReport" data-e="'+eid+'">⎙ تقرير</button>'+
+    '<button class="btn ghost sm" data-act="delOnline" data-e="'+eid+'" style="color:var(--bad)">حذف</button>'+
+    '</div>'+
+    (e.status==="draft"
+      ? '<div class="note warn" style="margin-top:10px">الامتحان مسودة — الطلاب مش شايفينه. '+
+        'انشره عشان يظهر لمجموعة <b>'+esc(g?g.name:"")+'</b>.</div>' : '')+
+    '</div></div>';
+
+  /* بنك الأسئلة */
+  var qs = (e.qs||[]).slice().sort(function(a,b){ return num(a.order,0)-num(b.order,0); });
+  h += '<div class="card"><div class="hd"><h3>الأسئلة</h3>'+
+    '<span class="tag">'+ar(qs.length)+'</span>'+
+    '<button class="btn sm" data-act="newQ" data-e="'+eid+'">+ سؤال</button></div><div class="bd flush">';
+  if(!qs.length) h += '<div class="empty"><div class="big">◔</div><b>مفيش أسئلة</b>'+
+    '<p>ضيف أسئلة عشان الطلاب يقدروا يدخلوا الامتحان.</p></div>';
+  qs.forEach(function(q,i){
+    var T = Q_TYPES.filter(function(t){ return t.id===q.type; })[0] || Q_TYPES[0];
+    h += '<div class="item" style="cursor:default;align-items:flex-start">'+
+      '<span class="av'+(qIsAuto(q)?" g":" w")+'">'+ar(i+1)+'</span>'+
+      '<span class="tx" data-act="editQ" data-e="'+eid+'" data-q="'+q.id+'" style="cursor:pointer">'+
+        '<b style="white-space:normal">'+esc(String(q.text||"").slice(0,90))+'</b>'+
+        '<small>'+esc(T.name)+' · '+ar(q.mark)+' درجة · '+
+        (qIsAuto(q)? "تصحيح تلقائي" : "تصحيح يدوي")+'</small></span>'+
+      '<span style="display:flex;flex-direction:column;gap:3px;flex:0 0 auto">'+
+        (i>0? '<button class="btn ghost sm" data-act="qUp" data-e="'+eid+'" data-q="'+q.id+'" style="padding:4px 8px">▲</button>':'')+
+        (i<qs.length-1? '<button class="btn ghost sm" data-act="qDown" data-e="'+eid+'" data-q="'+q.id+'" style="padding:4px 8px">▼</button>':'')+
+      '</span></div>';
+  });
+  h += '</div></div>';
+  return h;
+}
+
+/* ---------- نافذة الامتحان الإلكتروني ---------- */
+function modalOnline(eid){
+  var e = eid ? examById(eid) : null;
+  var now = new Date();
+  var d0 = now.toISOString().slice(0,16);
+  openModal(mh(e?"تعديل الامتحان":"امتحان إلكتروني جديد")+'<div class="mb">'+
+    '<label class="f"><span>اسم الامتحان</span>'+
+      '<input type="text" id="o_t" value="'+esc(e?e.title:"")+'" placeholder="مثال: امتحان الوحدة الأولى"></label>'+
+    '<div class="grid2">'+
+    '<label class="f"><span>المادة</span><input type="text" id="o_sub" value="'+
+      esc(e?(e.subject||DB.meta.subject):(DB.meta.subject||""))+'"></label>'+
+    '<label class="f"><span>المجموعة</span><select id="o_g">'+
+      DB.groups.map(function(g){
+        return '<option value="'+g.id+'"'+(e&&e.gid===g.id?" selected":"")+'>'+esc(g.name)+'</option>';
+      }).join("")+'</select></label>'+
+    '</div>'+
+    '<label class="f"><span>وصف الامتحان (اختياري)</span>'+
+      '<textarea id="o_d" style="min-height:58px">'+esc(e?e.desc:"")+'</textarea></label>'+
+    '<div class="grid2">'+
+    '<label class="f"><span>يبدأ</span><input type="datetime-local" id="o_from" value="'+
+      esc(e&&e.from? e.from : d0)+'"></label>'+
+    '<label class="f"><span>ينتهي</span><input type="datetime-local" id="o_to" value="'+
+      esc(e&&e.to? e.to : "")+'"></label>'+
+    '</div>'+
+    '<div class="grid2">'+
+    '<label class="f"><span>المدة بالدقائق (٠ = بلا حد)</span>'+
+      '<input type="number" id="o_m" inputmode="numeric" value="'+esc(e?e.mins:30)+'"></label>'+
+    '<label class="f"><span>عدد المحاولات</span>'+
+      '<input type="number" id="o_tr" inputmode="numeric" min="1" value="'+esc(e?e.tries:1)+'"></label>'+
+    '</div>'+
+    '<label class="f"><span>ظهور النتيجة للطالب</span><select id="o_sm">'+
+      SHOW_MODES.map(function(m){
+        return '<option value="'+m.id+'"'+(e&&e.showMode===m.id?" selected":"")+'>'+esc(m.name)+'</option>';
+      }).join("")+'</select></label>'+
+    '<div class="note">الدرجة الكلية بتتحسب تلقائيًا من مجموع درجات الأسئلة. '+
+      'وطريقة التصحيح بتتحدد لكل سؤال على حدة — والامتحان بيبقى مختلط لو فيه النوعين.</div>'+
+    '</div>'+mf(e?"حفظ":"إنشاء","saveOnline"));
+  $("#modal").dataset.eid = eid||"";
+}
+
+/* ---------- نافذة السؤال ---------- */
+function modalQ(eid, qid){
+  var e = examById(eid); if(!e) return;
+  var q = qid ? (e.qs||[]).filter(function(x){ return x.id===qid; })[0] : null;
+  var type = q? q.type : "mcq";
+  var opts = (q && q.opts && q.opts.length)? q.opts : ["",""];
+  openModal(mh(q?"تعديل السؤال":"سؤال جديد")+'<div class="mb">'+
+    '<label class="f"><span>نوع السؤال</span><select id="q_ty" data-act="qType">'+
+      Q_TYPES.map(function(t){
+        return '<option value="'+t.id+'"'+(type===t.id?" selected":"")+'>'+esc(t.name)+'</option>';
+      }).join("")+'</select></label>'+
+    '<label class="f"><span>نص السؤال</span>'+
+      '<textarea id="q_t" style="min-height:70px">'+esc(q?q.text:"")+'</textarea></label>'+
+    '<div class="grid2">'+
+    '<label class="f"><span>الدرجة</span>'+
+      '<input type="number" id="q_m" inputmode="decimal" step="0.5" value="'+esc(q?q.mark:1)+'"></label>'+
+    '<label class="f"><span>طريقة التصحيح</span><select id="q_gr">'+
+      '<option value="auto"'+(q&&q.grade==="manual"?"":" selected")+'>تلقائي</option>'+
+      '<option value="manual"'+(q&&q.grade==="manual"?" selected":"")+'>يدوي</option>'+
+      '</select></label>'+
+    '</div>'+
+    /* اختيار من متعدد */
+    '<div id="q_mcq" style="display:'+(type==="mcq"?"block":"none")+'">'+
+      '<div style="font-size:12.5px;color:var(--mut);font-weight:600;margin-bottom:6px">'+
+        'الاختيارات — علّم على الإجابة الصحيحة</div>'+
+      '<div id="q_opts">'+opts.map(function(o,i){
+        return optRow(i, o, q? String(q.correct)===String(i) : i===0);
+      }).join("")+'</div>'+
+      '<button class="btn ghost sm block" data-act="qAddOpt" style="margin-bottom:12px">+ اختيار</button>'+
+    '</div>'+
+    /* صح أو خطأ */
+    '<div id="q_tf" style="display:'+(type==="tf"?"block":"none")+'">'+
+      '<label class="f"><span>الإجابة الصحيحة</span><select id="q_tfv">'+
+        '<option value="1"'+(q&&String(q.tf)==="1"?" selected":"")+'>صح</option>'+
+        '<option value="0"'+(q&&String(q.tf)==="0"?" selected":"")+'>خطأ</option>'+
+        '</select></label>'+
+    '</div>'+
+    /* نصي */
+    '<div id="q_text" style="display:'+(type==="text"?"block":"none")+'">'+
+      '<label class="f"><span>الإجابات المقبولة — كل إجابة في سطر</span>'+
+        '<textarea id="q_texts" style="min-height:66px" placeholder="القاهرة&#10;القاهره">'+
+        esc(q&&q.texts? q.texts.join("\n"):"")+'</textarea></label>'+
+      '<label style="display:flex;align-items:center;gap:9px;padding:4px 0 12px;cursor:pointer">'+
+        '<input type="checkbox" id="q_exact"'+(q&&q.exact?" checked":"")+' style="width:18px;height:18px">'+
+        '<span style="font-size:13.5px">مطابقة تامة (تفرّق بين الهمزات والمسافات)</span></label>'+
+    '</div>'+
+    '<div id="q_essay" class="note" style="display:'+(type==="essay"?"block":"none")+'">'+
+      'السؤال المقالي بيتصحّح يدويًا — هيظهرلك في شاشة التصحيح بعد ما الطلاب يسلّموا.</div>'+
+    '<label class="f"><span>ملاحظة للمدرّس (اختياري)</span>'+
+      '<input type="text" id="q_n" value="'+esc(q?q.note:"")+'"></label>'+
+    (q? '<button class="btn ghost block" data-act="delQ" data-e="'+eid+'" data-q="'+qid+
+        '" style="color:var(--bad)">حذف السؤال</button>':'')+
+    '</div>'+mf(q?"حفظ":"إضافة","saveQ"));
+  $("#modal").dataset.eid = eid;
+  $("#modal").dataset.qid = qid||"";
+}
+function optRow(i, val, checked){
+  return '<div class="row" style="flex-wrap:nowrap;gap:7px;margin-bottom:7px" data-opt>'+
+    '<input type="radio" name="qcorrect" value="'+i+'"'+(checked?" checked":"")+
+      ' style="width:20px;height:20px;flex:0 0 20px;margin-top:11px">'+
+    '<input type="text" class="qopt" value="'+esc(val)+'" placeholder="نص الاختيار" style="flex:1">'+
+    '<button class="btn ghost sm" data-act="qDelOpt" style="flex:0 0 auto;color:var(--bad)">✕</button>'+
+    '</div>';
+}
+
+/* ============================================================
+   نتائج الامتحان — المدرّس
+   ============================================================ */
+function viewExamResults(eid){
+  var e = examById(eid);
+  if(!e){ UI.sub=null; return viewExams(); }
+  var g = groupById(e.gid), studs = groupStudents(e.gid), o = onlineStats(e);
+  var h = back("الامتحان","backOnline");
+  h += pageHd("نتائج: "+e.title, esc(g?g.name:"")+" · من "+ar(o.total)+" درجة",
+    '<button class="btn ghost sm" data-act="exReport" data-e="'+eid+'">⎙ تقرير</button>'+
+    '<button class="btn ghost sm" data-act="exCsv" data-e="'+eid+'">↓ تصدير</button>');
+
+  h += '<div class="stats">'+
+    stat("سلّموا", ar(o.submitted)+" / "+ar(o.students), ar(o.notStarted)+" ما دخلوش","")+
+    stat("المتوسط", o.avg!=null? ar(o.avg) : "—", "من "+ar(o.total),"acc")+
+    stat("أعلى / أقل", (o.max!=null? ar(o.max):"—")+" / "+(o.min!=null? ar(o.min):"—"),"","money")+
+    stat("نسبة النجاح", ar(o.passPct)+"٪", ar(o.pass)+" ناجح · "+ar(o.fail)+" راسب",
+         o.passPct>=60?"money":"late")+
+  '</div>';
+
+  if(o.pending)
+    h += '<div class="note warn" style="margin-bottom:12px"><b>'+ar(o.pending)+
+      ' طالب</b> عنده أسئلة مقالية محتاجة تصحيح. النتيجة مش نهائية قبل ما تصحّحها.</div>';
+
+  h += '<div class="card"><div class="hd"><h3>الطلاب</h3></div><div class="bd flush">';
+  studs.forEach(function(st){
+    var a = o.byStu[st.id];
+    if(!a){
+      h += '<div class="item" style="cursor:default;opacity:.6">'+
+        '<span class="av w">—</span><span class="tx"><b>'+esc(st.name)+'</b>'+
+        '<small>ما دخلش الامتحان</small></span>'+
+        '<span class="tag">غايب</span></div>';
+      return;
+    }
+    a = gradeAttempt(a);
+    var pct = o.total? Math.round(a.total/o.total*100) : 0;
+    var dur = a.submittedAt? Math.round((a.submittedAt-a.startedAt)/60000) : null;
+    h += '<button class="item" data-act="gradeStu" data-e="'+eid+'" data-s="'+st.id+'">'+
+      '<span class="av'+(!a.submittedAt?" w":(a.pending?" w":(pct>=50?" g":" b")))+'">'+
+        (a.submittedAt? ar(a.total) : "…")+'</span>'+
+      '<span class="tx"><b>'+esc(st.name)+'</b><small>'+
+        (!a.submittedAt ? "لسه بيحل"
+          : "سلّم "+(dur!=null? "في "+ar(dur)+" د · ":"")+
+            "تلقائي "+ar(a.auto)+(a.manual? " · يدوي "+ar(a.manual):"")+" · "+ar(pct)+"٪")+
+        '</small></span>'+
+      (!a.submittedAt? '<span class="tag warn">جاري</span>'
+        : a.pending? '<span class="tag warn">'+ar(a.pending)+' للتصحيح</span>'
+        : '<span class="tag '+(pct>=50?"ok":"bad")+'">'+(pct>=50?"ناجح":"راسب")+'</span>')+
+      '<span class="chev">‹</span></button>';
+  });
+  return h+'</div></div>';
+}
+
+/* ---------- تصحيح إجابات طالب ---------- */
+function viewGradeStu(eid, sid){
+  var e = examById(eid), st = studentById(sid);
+  if(!e || !st){ UI.sub=null; return viewExams(); }
+  var all = attemptsOf(eid, sid);
+  var a = all.filter(function(x){ return x.submittedAt; }).sort(function(x,y){ return y.total-x.total; })[0] || all[0];
+  if(!a) { UI.sub={res:eid}; return viewExamResults(eid); }
+  a = gradeAttempt(a);
+  var tot = examTotalMark(e);
+  var pct = tot? Math.round(a.total/tot*100) : 0;
+  var qs = (e.qs||[]).slice().sort(function(x,y){ return num(x.order,0)-num(y.order,0); });
+
+  var h = back("النتائج","backResults");
+  h += pageHd(st.name, esc(e.title)+" · "+ar(a.total)+" من "+ar(tot)+" ("+ar(pct)+"٪)",
+    (contactOf(st)? '<button class="btn ghost sm" data-act="waExamRes" data-e="'+eid+'" data-s="'+sid+'">✆ ابعت النتيجة</button>':''));
+
+  h += '<div class="stats">'+
+    stat("تلقائي", ar(a.auto),"","money")+
+    stat("يدوي", ar(a.manual),"","")+
+    stat("النهائي", ar(a.total), "من "+ar(tot), pct>=50?"money":"late")+
+    stat("الحالة", a.pending? "في انتظار التصحيح":"مكتمل",
+         a.pending? ar(a.pending)+" سؤال":"", a.pending?"late":"money")+
+  '</div>';
+
+  h += '<div class="card"><div class="bd flush">';
+  qs.forEach(function(q,i){
+    var ans = (a.answers||{})[q.id];
+    var mk  = (a.marks||{})[q.id];
+    var auto = qIsAuto(q);
+    var shown = ans;
+    if(q.type==="mcq") shown = (q.opts||[])[num(ans,-1)] || "—";
+    if(q.type==="tf")  shown = ans==="1"? "صح" : (ans==="0"? "خطأ" : "—");
+    var right = "";
+    if(q.type==="mcq") right = (q.opts||[])[num(q.correct,-1)] || "";
+    if(q.type==="tf")  right = String(q.tf)==="1"? "صح":"خطأ";
+    if(q.type==="text") right = (q.texts||[]).join(" · ");
+    var ok2 = auto && mk!=null && num(mk,0) >= num(q.mark,1);
+
+    h += '<div class="item" style="cursor:default;align-items:flex-start;flex-direction:column;gap:8px">'+
+      '<div style="display:flex;gap:10px;width:100%;align-items:flex-start">'+
+        '<span class="av'+(auto? (ok2?" g":" b") : " w")+'">'+ar(i+1)+'</span>'+
+        '<span class="tx"><b style="white-space:normal">'+esc(q.text)+'</b>'+
+        '<small>'+esc(qTypeName(q.type))+' · '+ar(q.mark)+' درجة · '+
+          (auto?"تلقائي":"يدوي")+'</small></span>'+
+        '<span class="tag '+(mk!=null&&mk!==""?(ok2||!auto?"ok":"bad"):"warn")+'">'+
+          (mk!=null&&mk!==""? ar(mk)+" / "+ar(q.mark) : "للتصحيح")+'</span>'+
+      '</div>'+
+      '<div style="width:100%;padding-inline-start:48px">'+
+        '<div class="note" style="margin-bottom:6px"><b>إجابة الطالب:</b><br>'+
+          (shown===undefined||shown===""||shown===null? '<span style="color:var(--bad)">لم يجب</span>'
+            : esc(String(shown)))+'</div>'+
+        (right? '<div class="note ok" style="margin-bottom:6px"><b>الإجابة الصحيحة:</b> '+esc(right)+'</div>':'')+
+        (!auto
+          ? '<div class="row" style="flex-wrap:nowrap;gap:7px">'+
+            '<input type="number" inputmode="decimal" step="0.5" min="0" max="'+esc(q.mark)+'" '+
+              'value="'+esc(mk==null?"":mk)+'" data-act="setQMark" data-a="'+a.id+'" data-q="'+q.id+
+              '" placeholder="الدرجة" style="width:90px;flex:0 0 90px;text-align:center">'+
+            '<input type="text" value="'+esc((a.notes||{})[q.id]||"")+'" '+
+              'data-act="setQNote" data-a="'+a.id+'" data-q="'+q.id+
+              '" placeholder="تعليق للطالب (اختياري)" style="flex:1">'+
+            '</div>' : '')+
+      '</div></div>';
+  });
+  return h+'</div></div>';
 }
 
 /* ---------- الواجبات والتسميع ---------- */
@@ -2508,6 +2995,199 @@ function viewStudentPortal(){
     '</div></div>';
   return h;
 }
+/* ============================================================
+   امتحانات الطالب
+   الطالب بيدخل بكود مجموعته، فمبيشوفش غير امتحانات مجموعته.
+   الإجابات بتتحفظ محليًا مع كل تغيير + بتترفع للسحابة — فلو
+   الصفحة اتحدّثت أو النت قطع، الإجابات مبتضيعش.
+   ============================================================ */
+function stuExams(){
+  if(!GATE.sid) return [];
+  var out = [];
+  (GATE.exams||[]).forEach(function(e){
+    if(examState(e)==="draft" || examState(e)==="closed") return;
+    out.push(e);
+  });
+  return out.sort(function(a,b){ return String(b.from||"").localeCompare(String(a.from||"")); });
+}
+function stuAttempt(examId){
+  var k = "att_"+examId+"_"+GATE.sid;
+  try{ var v = localStorage.getItem(KEY+"_"+k); return v? JSON.parse(v) : null; }
+  catch(e){ return null; }
+}
+function saveStuAttempt(a){
+  try{ localStorage.setItem(KEY+"_att_"+a.examId+"_"+a.sid, JSON.stringify(a)); }catch(e){}
+  /* الرفع للسحابة — فشله مايضيّعش الإجابة المحفوظة محليًا */
+  if(fbOn()){
+    fbSet("attempts/"+GATE.code+"/"+a.examId+"/"+a.sid, a).catch(function(){
+      UI.saveWarn = true;
+    });
+  }
+}
+function viewStuExams(){
+  var list = stuExams();
+  var h = '<div style="display:flex;align-items:center;gap:9px;margin-bottom:12px">'+
+    '<div style="flex:1"><h2 style="font-size:20px">الامتحانات</h2>'+
+    '<div class="mut" style="font-size:12.5px">امتحانات مجموعتك</div></div>'+
+    '<button class="btn ghost sm" data-act="stuBack">→ رجوع</button></div>';
+  if(!list.length)
+    return h+'<div class="card"><div class="bd"><div class="empty"><div class="big">◔</div>'+
+      '<b>مفيش امتحانات دلوقتي</b><p>أول ما المدرّس ينشر امتحان هيظهرلك هنا.</p></div></div></div>';
+  h += '<div class="card"><div class="bd flush">';
+  list.forEach(function(e){
+    var stt = examStateName(examState(e));
+    var a = stuAttempt(e.id);
+    var done = a && a.submittedAt;
+    var tot = examTotalMark(e);
+    h += '<div class="item" style="cursor:default;align-items:flex-start;flex-direction:column;gap:8px">'+
+      '<div style="display:flex;gap:10px;width:100%">'+
+        '<span class="av'+(done?" g":(examState(e)==="open"?"":" w"))+'">◔</span>'+
+        '<span class="tx"><b>'+esc(e.title)+'</b><small>'+
+          ar((e.qs||[]).length)+' سؤال · '+ar(tot)+' درجة'+
+          (e.mins? ' · '+ar(e.mins)+' دقيقة':'')+
+          (e.from? '<br>يبدأ '+fmtD(e.from.slice(0,10))+' '+esc(e.from.slice(11,16)):'')+
+          (e.to? ' · ينتهي '+fmtD(e.to.slice(0,10))+' '+esc(e.to.slice(11,16)):'')+
+        '</small></span>'+
+        '<span class="tag '+stt.c+'">'+esc(stt.name)+'</span>'+
+      '</div>'+
+      (e.desc? '<div class="note" style="width:100%">'+esc(e.desc)+'</div>':'')+
+      '<div style="width:100%">'+
+        (done
+          ? (canSeeResult(e, gradeAttempt(a))
+              ? '<div class="note ok"><b>نتيجتك: '+ar(a.total)+' من '+ar(tot)+'</b>'+
+                ' ('+ar(tot? Math.round(a.total/tot*100):0)+'٪)'+
+                (a.pending? '<br><span style="color:var(--warn)">فيه أسئلة لسه بتتصحّح — النتيجة مش نهائية</span>':'')+
+                '</div>'
+              : '<div class="note"><b>اتسلّم ✓</b> — '+
+                (e.showMode==="never"? "النتيجة مش هتظهر هنا"
+                 : "النتيجة هتظهر بعد ما المدرّس يخلّص التصحيح")+'</div>')
+          : (function(){
+              var chk = examOpenForStu(e);
+              return chk.ok
+                ? '<button class="btn block" data-act="stuStart" data-e="'+e.id+'">'+
+                  (chk.resume? "▶ كمّل الامتحان" : "▶ ابدأ الامتحان")+'</button>'
+                : '<div class="note warn">'+esc(chk.why)+'</div>';
+            })())+
+      '</div></div>';
+  });
+  return h+'</div></div>';
+}
+/* التحقق من صلاحية الطالب — بيتأكد من الوقت والمحاولات */
+function examOpenForStu(e){
+  if(examState(e)!=="open") return { ok:false, why:"الامتحان مش متاح دلوقتي" };
+  var a = stuAttempt(e.id);
+  if(a && !a.submittedAt) return { ok:true, resume:a };
+  if(a && a.submittedAt){
+    var tries = Math.max(1, num(e.tries,1));
+    if(num(a.tryNo,1) >= tries) return { ok:false, why:"خلصت محاولاتك ("+ar(tries)+")" };
+  }
+  return { ok:true };
+}
+
+/* ---------- شاشة حل الامتحان ---------- */
+function viewTakeExam(){
+  var e = (GATE.exams||[]).filter(function(x){ return x.id===UI.takeId; })[0];
+  if(!e){ UI.take=false; return viewStuExams(); }
+  var a = UI.attempt;
+  if(!a){ UI.take=false; return viewStuExams(); }
+  var qs = (e.qs||[]).slice().sort(function(x,y){ return num(x.order,0)-num(y.order,0); });
+  var i = Math.max(0, Math.min(UI.qi||0, qs.length-1));
+  var q = qs[i];
+  var answered = qs.filter(function(x){
+    var v=(a.answers||{})[x.id]; return v!==undefined && v!==null && v!==""; }).length;
+
+  var left = attemptLeftStu(a, e);
+  var warn = left<=60 && num(e.mins,0)>0;
+  var h = '<div class="card" style="position:sticky;top:56px;z-index:20">'+
+    '<div class="bd" style="padding:10px 14px">'+
+      '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
+        '<b style="flex:1;font-family:Cairo,sans-serif;font-size:14px">'+esc(e.title)+'</b>'+
+        (num(e.mins,0)? '<span class="tag '+(warn?"bad":"ok")+'" style="font-size:14px;padding:6px 12px;'+
+          'font-family:Cairo,sans-serif;font-weight:900;direction:ltr">'+fmtLeft(left)+'</span>':'')+
+      '</div>'+
+      '<div style="display:flex;align-items:center;gap:8px;margin-top:8px">'+
+        '<span class="mut" style="font-size:12px">سؤال '+ar(i+1)+' من '+ar(qs.length)+'</span>'+
+        '<span style="flex:1;height:6px;background:var(--line2);border-radius:99px;overflow:hidden">'+
+          '<span style="display:block;height:100%;width:'+Math.round(answered/Math.max(qs.length,1)*100)+
+          '%;background:var(--ok)"></span></span>'+
+        '<span class="mut" style="font-size:12px">اتجاوب '+ar(answered)+'</span>'+
+      '</div>'+
+    '</div></div>';
+
+  if(warn) h += '<div class="note bad" style="margin-bottom:12px">⏰ باقي أقل من دقيقة — '+
+    'الامتحان هيتسلّم تلقائيًا.</div>';
+  if(UI.saveWarn) h += '<div class="note warn" style="margin-bottom:12px">'+
+    'مفيش اتصال بالسحابة — إجاباتك محفوظة على جهازك وهتترفع أول ما النت يرجع.</div>';
+
+  /* السؤال */
+  h += '<div class="card"><div class="bd">'+
+    '<div style="font-size:11px;color:var(--mut);font-weight:700">'+
+      esc(qTypeName(q.type))+' · '+ar(q.mark)+' درجة</div>'+
+    '<div style="font-family:Cairo,sans-serif;font-weight:800;font-size:17px;margin:8px 0 14px;'+
+      'line-height:1.7">'+esc(q.text)+'</div>'+
+    qBodyHTML(q, (a.answers||{})[q.id])+
+    '</div></div>';
+
+  /* التنقل */
+  h += '<div class="card"><div class="bd">'+
+    '<div class="row" style="margin-bottom:10px">'+
+      (i>0? '<button class="btn ghost sm" data-act="qPrev">→ السابق</button>':'')+
+      (i<qs.length-1? '<button class="btn sm" data-act="qNext">التالي ←</button>':'')+
+    '</div>'+
+    '<div class="row" style="gap:5px">'+
+      qs.map(function(x,j){
+        var got = (a.answers||{})[x.id];
+        var on = (got!==undefined && got!==null && got!=="");
+        return '<button class="btn '+(j===i?"":(on?"ok":"ghost"))+' sm" data-act="qGo" data-i="'+j+
+          '" style="width:38px;padding:7px 0;'+(j===i?"":(on?"":"color:var(--mut)"))+'">'+ar(j+1)+'</button>';
+      }).join("")+
+    '</div>'+
+    '<button class="btn block" data-act="stuSubmit" style="margin-top:12px;background:var(--warn)">'+
+      '✓ تسليم الامتحان</button>'+
+    '</div></div>';
+  return h;
+}
+function qBodyHTML(q, val){
+  /* الاختيار بزرار كامل — أسهل على الموبايل وبيسجّل من أول لمسة */
+  if(q.type==="mcq")
+    return '<div>'+(q.opts||[]).map(function(o,i){
+      var on = String(val)===String(i);
+      return '<button data-act="stuAnsV" data-v="'+i+'" '+
+        'style="display:flex;align-items:center;gap:10px;padding:14px;width:100%;text-align:right;'+
+        'border:1.5px solid '+(on?"var(--seal)":"var(--line)")+';border-radius:12px;margin-bottom:8px;'+
+        'cursor:pointer;font:inherit;background:'+(on?"var(--seal-l)":"var(--card)")+'">'+
+        '<span style="width:22px;height:22px;border-radius:50%;flex:0 0 22px;'+
+          'border:2px solid '+(on?"var(--seal)":"var(--line)")+';display:grid;place-items:center">'+
+          (on? '<span style="width:11px;height:11px;border-radius:50%;background:var(--seal)"></span>':'')+
+        '</span>'+
+        '<span style="flex:1;font-size:15px;'+(on?"font-weight:700;color:var(--seal)":"")+'">'+
+          esc(o)+'</span></button>';
+    }).join("")+'</div>';
+  if(q.type==="tf")
+    return '<div class="row">'+[["1","✓ صح"],["0","✕ خطأ"]].map(function(p){
+      var on = String(val)===p[0];
+      return '<button class="btn '+(on?"":"ghost")+'" data-act="stuAnsV" data-v="'+p[0]+
+        '" style="flex:1;padding:18px;font-size:16px">'+p[1]+'</button>';
+    }).join("")+'</div>';
+  if(q.type==="text")
+    return '<input type="text" id="ansBox" value="'+esc(val==null?"":val)+'" '+
+      'data-act="stuAnsBox" placeholder="اكتب إجابتك" style="font-size:16px;padding:14px">';
+  return '<textarea id="ansBox" data-act="stuAnsBox" placeholder="اكتب إجابتك" '+
+    'style="min-height:160px;font-size:15px">'+esc(val==null?"":val)+'</textarea>';
+}
+function attemptLeftStu(a, e){
+  var mins = num(e.mins,0);
+  if(!mins) return 999999;
+  var endD = a.startedAt + mins*60000;
+  var endW = e.to ? new Date(e.to).getTime() : Infinity;
+  return Math.max(0, Math.floor((Math.min(endD, endW) - Date.now())/1000));
+}
+function fmtLeft(s){
+  if(s>=999999) return "بلا حد";
+  var m = Math.floor(s/60), x = s%60;
+  return m+":"+String(x).padStart(2,"0");
+}
+
 function nextSession(g){
   var days = g.days||[];
   if(!days.length) return null;
@@ -3296,7 +3976,12 @@ var ACTS = {
   },
   gStuGo: function(){ gStudentIn(); },
   gBookGo:function(){ gSendBooking(); },
-  gWho:   function(el){ GATE.sid = el.dataset.s||""; gLoadNotices().then(render); },
+  gWho:   function(el){
+    GATE.sid = el.dataset.s||"";
+    try{ var q=JSON.parse(localStorage.getItem(KEY+"_sess")||"{}"); q.s=GATE.sid;
+         localStorage.setItem(KEY+"_sess", JSON.stringify(q)); }catch(e){}
+    Promise.all([gLoadNotices(), gLoadExams()]).then(render);
+  },
   gOut:   function(){
     try{ if(FB.auth) FB.auth.signOut(); }catch(e){}
     try{ localStorage.removeItem(KEY+"_sess"); }catch(e){}
@@ -3305,6 +3990,179 @@ var ACTS = {
   },
 
   /* ---------- الامتحانات ---------- */
+  /* ============================================================
+     الامتحانات الإلكترونية — المدرّس
+     ============================================================ */
+  newOnline:  function(){ if(!DB.groups.length){ toast("اعمل مجموعة الأول"); return; } modalOnline(""); },
+  editOnline: function(el){ modalOnline(el.dataset.e); },
+  openOnline: function(el){ UI.lastExam=el.dataset.e; UI.sub={on:el.dataset.e}; UI.tab="exams"; render(); },
+  backOnline: function(){ UI.sub = UI.lastExam? {on:UI.lastExam} : null; UI.tab="exams"; render(); },
+  backResults:function(){ UI.sub = UI.lastExam? {res:UI.lastExam} : null; UI.tab="exams"; render(); },
+  saveOnline: function(){
+    var eid=$("#modal").dataset.eid, t=val("o_t").trim();
+    if(!t){ toast("اكتب اسم الامتحان"); return; }
+    var e = eid? examById(eid) : null;
+    if(!e){ e={ id:uid("x"), online:1, qs:[], marks:{}, status:"draft", at:Date.now() }; DB.exams.push(e); }
+    e.online=1; e.title=t; e.subject=val("o_sub").trim(); e.gid=val("o_g");
+    e.desc=val("o_d").trim(); e.from=val("o_from"); e.to=val("o_to");
+    e.mins=Math.max(0,num(val("o_m"),0)); e.tries=Math.max(1,num(val("o_tr"),1));
+    e.showMode=val("o_sm")||"now";
+    e.date=(e.from||today()).slice(0,10);
+    e.max=examTotalMark(e);
+    saveSync(); pushExams(); closeModal();
+    UI.lastExam=e.id; UI.sub={on:e.id}; UI.tab="exams"; render();
+    toast(eid? "اتحفظ" : "اتعمل الامتحان — ضيف الأسئلة دلوقتي");
+  },
+  delOnline: function(el){
+    var e=examById(el.dataset.e); if(!e) return;
+    var n2=attemptsOf(e.id).length;
+    if(!confirm("حذف «"+e.title+"»؟\n\n"+(n2? n2+" محاولة للطلاب هتتحذف معاه.\n":"")+"مفيش تراجع.")) return;
+    DB.attempts=DB.attempts.filter(function(a){ return a.examId!==e.id; });
+    DB.exams=DB.exams.filter(function(x){ return x!==e; });
+    saveSync(); pushExams(); UI.sub=null; render(); toast("اتحذف");
+  },
+  dupExam: function(el){
+    var e=examById(el.dataset.e); if(!e) return;
+    var c=JSON.parse(JSON.stringify(e));
+    c.id=uid("x"); c.title=e.title+" — نسخة"; c.status="draft"; c.at=Date.now();
+    (c.qs||[]).forEach(function(q){ q.id=uid("q"); });
+    DB.exams.push(c); saveSync(); pushExams();
+    UI.lastExam=c.id; UI.sub={on:c.id}; render(); toast("اتنسخ");
+  },
+  exPublish: function(el){
+    var e=examById(el.dataset.e); if(!e) return;
+    if(!(e.qs||[]).length){ toast("ضيف أسئلة الأول"); return; }
+    if(!e.from){ toast("حدّد وقت البداية"); return; }
+    e.status="open"; e.max=examTotalMark(e);
+    saveSync(); pushExams(); render();
+    toast("اتنشر — الطلاب هيشوفوه بكود المجموعة");
+  },
+  exDraft: function(el){
+    var e=examById(el.dataset.e); if(!e) return;
+    if(!confirm("ترجّعه مسودة؟ الطلاب مش هيشوفوه.")) return;
+    e.status="draft"; saveSync(); pushExams(); render(); toast("بقى مسودة");
+  },
+  exClose: function(el){
+    var e=examById(el.dataset.e); if(!e) return;
+    if(!confirm("قفل الامتحان؟ محدش هيقدر يدخله بعد كده.")) return;
+    e.status="closed"; saveSync(); pushExams(); render(); toast("اتقفل");
+  },
+  examResults: function(el){ UI.lastExam=el.dataset.e; UI.sub={res:el.dataset.e}; UI.tab="exams"; render(); },
+  gradeStu: function(el){
+    UI.lastExam=el.dataset.e;
+    UI.sub={gr:el.dataset.e, sid:el.dataset.s}; UI.tab="exams"; render();
+  },
+  /* ---------- الأسئلة ---------- */
+  newQ:  function(el){ modalQ(el.dataset.e, ""); },
+  editQ: function(el){ modalQ(el.dataset.e, el.dataset.q); },
+  qType: function(){},
+  qAddOpt: function(){
+    var box=document.getElementById("q_opts"); if(!box) return;
+    var i=box.querySelectorAll("[data-opt]").length;
+    box.insertAdjacentHTML("beforeend", optRow(i,"",false));
+  },
+  qDelOpt: function(el){
+    var box=document.getElementById("q_opts");
+    if(box && box.querySelectorAll("[data-opt]").length<=2){ toast("لازم اختيارين على الأقل"); return; }
+    var row=el.closest("[data-opt]"); if(row) row.remove();
+    document.querySelectorAll("#q_opts [data-opt]").forEach(function(r,i){
+      var rd=r.querySelector('input[type=radio]'); if(rd) rd.value=i;
+    });
+  },
+  saveQ: function(){
+    var eid=$("#modal").dataset.eid, qid=$("#modal").dataset.qid;
+    var e=examById(eid); if(!e) return;
+    var text=val("q_t").trim();
+    if(!text){ toast("اكتب نص السؤال"); return; }
+    var type=val("q_ty")||"mcq";
+    var q = qid? (e.qs||[]).filter(function(x){ return x.id===qid; })[0] : null;
+    if(!q){ q={ id:uid("q"), order:(e.qs||[]).length }; e.qs=e.qs||[]; e.qs.push(q); }
+    q.type=type; q.text=text; q.mark=num(val("q_m"),1);
+    q.grade = (type==="essay") ? "manual" : (val("q_gr")||"auto");
+    q.note=val("q_n").trim();
+    if(type==="mcq"){
+      var opts=[]; document.querySelectorAll("#q_opts .qopt").forEach(function(x){ opts.push(x.value.trim()); });
+      opts=opts.filter(function(x){ return x; });
+      if(opts.length<2){ toast("لازم اختيارين على الأقل"); return; }
+      var rd=document.querySelector('#q_opts input[name=qcorrect]:checked');
+      var ci=rd? num(rd.value,0) : 0;
+      if(ci>=opts.length) ci=0;
+      q.opts=opts; q.correct=ci;
+    }
+    if(type==="tf") q.tf=val("q_tfv")||"1";
+    if(type==="text"){
+      q.texts=String(val("q_texts")||"").split("\n").map(function(x){ return x.trim(); })
+        .filter(function(x){ return x; });
+      q.exact=!!(document.getElementById("q_exact")&&document.getElementById("q_exact").checked);
+    }
+    e.max=examTotalMark(e);
+    saveSync(); pushExams(); closeModal(); render();
+    toast(qid? "اتحفظ السؤال" : "اتضاف السؤال");
+  },
+  delQ: function(el){
+    var e=examById(el.dataset.e); if(!e) return;
+    if(!confirm("حذف السؤال؟")) return;
+    e.qs=(e.qs||[]).filter(function(q){ return q.id!==el.dataset.q; });
+    e.qs.forEach(function(q,i){ q.order=i; });
+    e.max=examTotalMark(e);
+    saveSync(); pushExams(); closeModal(); render(); toast("اتحذف");
+  },
+  qUp:   function(el){ moveQ(el.dataset.e, el.dataset.q, -1); },
+  qDown: function(el){ moveQ(el.dataset.e, el.dataset.q, +1); },
+  setQMark: function(){},
+  setQNote: function(){},
+  waExamRes: function(el){
+    var e=examById(el.dataset.e), st=studentById(el.dataset.s);
+    if(!e||!st) return;
+    var a=attemptsOf(e.id, st.id).filter(function(x){ return x.submittedAt; })[0];
+    if(!a){ toast("الطالب ما سلّمش"); return; }
+    a=gradeAttempt(a);
+    waOpen(contactOf(st), waMsg("mark", st, { mark:a.total, max:examTotalMark(e) }));
+  },
+  exReport: function(el){ examReport(el.dataset.e); },
+  exCsv:    function(el){ examCsv(el.dataset.e); },
+  pullAtt:  function(){ pullAttempts(true); },
+
+  /* ============================================================
+     الامتحانات — الطالب
+     ============================================================ */
+  stuExams: function(){ UI.stuTab="exams"; render(); },
+  stuBack:  function(){ UI.stuTab=""; UI.take=false; render(); },
+  stuStart: function(el){
+    var e=(GATE.exams||[]).filter(function(x){ return x.id===el.dataset.e; })[0];
+    if(!e) return;
+    var chk=examOpenForStu(e);
+    if(!chk.ok){ toast(chk.why); render(); return; }
+    var a=chk.resume;
+    if(!a){
+      var prev=stuAttempt(e.id);
+      a={ id:uid("at"), examId:e.id, sid:GATE.sid, code:GATE.code,
+          name:(GATE.grp&&GATE.grp.students&&GATE.grp.students[GATE.sid])? GATE.grp.students[GATE.sid].n : "",
+          tryNo:(prev? num(prev.tryNo,1)+1 : 1),
+          startedAt:Date.now(), submittedAt:0, answers:{}, marks:{}, notes:{} };
+      saveStuAttempt(a);
+    }
+    UI.attempt=a; UI.takeId=e.id; UI.take=true; UI.qi=0; UI.saveWarn=false;
+    render();
+  },
+  qPrev: function(){ UI.qi=Math.max(0,(UI.qi||0)-1); render(); },
+  qNext: function(){ UI.qi=(UI.qi||0)+1; render(); },
+  qGo:   function(el){ UI.qi=num(el.dataset.i,0); render(); },
+  stuAns:   function(){},
+  stuAnsV:  function(el){ setStuAns(el.dataset.v); },
+  stuAnsBox:function(){},
+  stuSubmit: function(){
+    var e=(GATE.exams||[]).filter(function(x){ return x.id===UI.takeId; })[0];
+    var a=UI.attempt;
+    if(!e||!a) return;
+    var qs=e.qs||[];
+    var miss=qs.filter(function(q){
+      var v=(a.answers||{})[q.id]; return v===undefined||v===null||v===""; }).length;
+    if(!confirm("تسليم الامتحان؟"+(miss? "\n\nفيه "+miss+" سؤال من غير إجابة." : "")+
+      "\n\nمش هتقدر تعدّل بعد التسليم.")) return;
+    submitAttempt();
+  },
+
   newExam:  function(){ if(!DB.groups.length){ toast("اعمل مجموعة الأول"); return; } modalExam(""); },
   editExam: function(el){ modalExam(el.dataset.e); },
   openExam: function(el){ UI.sub={e:el.dataset.e}; UI.tab="exams"; render(); },
@@ -3836,6 +4694,203 @@ function bulkAtt(gid, d, v){
   toast(v==="P"? "الكل حاضر" : "الكل غايب");
 }
 
+/* ============================================================
+   دوال مساعدة للامتحانات
+   ============================================================ */
+function moveQ(eid, qid, dir){
+  var e = examById(eid); if(!e) return;
+  var qs = (e.qs||[]).slice().sort(function(a,b){ return num(a.order,0)-num(b.order,0); });
+  var i = qs.findIndex(function(q){ return q.id===qid; });
+  var j = i + dir;
+  if(i<0 || j<0 || j>=qs.length) return;
+  var t = qs[i]; qs[i] = qs[j]; qs[j] = t;
+  qs.forEach(function(q,k){ q.order = k; });
+  e.qs = qs;
+  saveSync(); pushExams(); render();
+}
+/* رفع الامتحانات للنسخة العامة عشان الطالب يشوفها */
+function pushExams(){
+  if(!fbOn() || FB.role!=="teacher" || !FB.db) return;
+  var byCode = {};
+  DB.exams.forEach(function(e){
+    if(!isOnlineExam(e)) return;
+    var g = groupById(e.gid);
+    if(!g || !g.code) return;
+    var c = normCode(g.code);
+    byCode[c] = byCode[c] || {};
+    /* بنرفع الأسئلة من غير الإجابات الصحيحة — الطالب مالوش شغل بيها */
+    byCode[c][e.id] = {
+      id:e.id, title:e.title, subject:e.subject||"", desc:e.desc||"",
+      from:e.from||"", to:e.to||"", mins:num(e.mins,0), tries:num(e.tries,1),
+      showMode:e.showMode||"now", status:e.status||"draft", online:1,
+      qs:(e.qs||[]).map(function(q){
+        return { id:q.id, type:q.type, text:q.text, mark:num(q.mark,1),
+                 order:num(q.order,0), opts:q.opts||[] };
+      })
+    };
+  });
+  fbSet("pub/exams", byCode).catch(function(){});
+}
+/* تسجيل إجابة الطالب — بيحفظ فورًا */
+function setStuAns(v){
+  var e = (GATE.exams||[]).filter(function(x){ return x.id===UI.takeId; })[0];
+  var a = UI.attempt;
+  if(!e || !a || a.submittedAt) return;
+  var qs = (e.qs||[]).slice().sort(function(x,y){ return num(x.order,0)-num(y.order,0); });
+  var q = qs[UI.qi||0];
+  if(!q) return;
+  a.answers = a.answers || {};
+  a.answers[q.id] = v;
+  a.savedAt = Date.now();
+  saveStuAttempt(a);
+  render();
+}
+/* التسليم */
+function submitAttempt(){
+  var a = UI.attempt;
+  if(!a || a.submittedAt) return;
+  a.submittedAt = Date.now();
+  saveStuAttempt(a);
+  UI.take = false;
+  /* نجيب النتيجة من السحابة لو ظهرت */
+  pullMyResult(a.examId);
+  render();
+  toast("اتسلّم الامتحان ✓");
+}
+function pullMyResult(examId){
+  if(!fbOn() || !GATE.code || !GATE.sid) return;
+  fbGet("results/"+GATE.code+"/"+examId+"/"+GATE.sid).then(function(r){
+    if(!r) return;
+    var a = stuAttempt(examId);
+    if(!a) return;
+    a.total = num(r.total,0); a.auto = num(r.auto,0);
+    a.manual = num(r.manual,0); a.pending = num(r.pending,0);
+    try{ localStorage.setItem(KEY+"_att_"+examId+"_"+GATE.sid, JSON.stringify(a)); }catch(e){}
+    render();
+  }).catch(function(){});
+}
+/* المدرّس بيسحب محاولات الطلاب */
+function pullAttempts(loud){
+  if(!fbOn() || FB.role!=="teacher"){ if(loud) toast("مفيش اتصال"); return; }
+  var codes = DB.groups.map(function(g){ return normCode(g.code); }).filter(Boolean);
+  var got = 0;
+  Promise.all(codes.map(function(c){
+    return fbGet("attempts/"+c).catch(function(){ return null; });
+  })).then(function(all){
+    all.forEach(function(byExam){
+      if(!byExam) return;
+      Object.keys(byExam).forEach(function(exId){
+        Object.keys(byExam[exId]||{}).forEach(function(sid){
+          var r = byExam[exId][sid];
+          if(!r || !r.id) return;
+          var cur = DB.attempts.filter(function(x){ return x.id===r.id; })[0];
+          if(cur){
+            /* بناخد الأحدث بس — عشان ما ندهسش تصحيح المدرّس */
+            if(num(r.savedAt,0) > num(cur.savedAt,0) || (r.submittedAt && !cur.submittedAt)){
+              cur.answers = r.answers||{}; cur.submittedAt = r.submittedAt||0;
+              cur.savedAt = r.savedAt||0; got++;
+            }
+          }else{
+            DB.attempts.push({ id:r.id, examId:exId, sid:sid, tryNo:num(r.tryNo,1),
+              startedAt:num(r.startedAt,0), submittedAt:num(r.submittedAt,0),
+              savedAt:num(r.savedAt,0), answers:r.answers||{}, marks:{}, notes:{} });
+            got++;
+          }
+        });
+      });
+    });
+    if(got){ DB.attempts.forEach(gradeAttempt); save(); render(); }
+    if(loud) toast(got? "وصل "+ar(got)+" تحديث" : "مفيش جديد");
+  });
+}
+/* رفع النتائج للطلاب */
+function pushResults(examId){
+  if(!fbOn() || FB.role!=="teacher") return;
+  var e = examById(examId); if(!e) return;
+  var g = groupById(e.gid); if(!g || !g.code) return;
+  var out = {};
+  attemptsOf(examId).forEach(function(a){
+    if(!a.submittedAt) return;
+    a = gradeAttempt(a);
+    out[a.sid] = { total:a.total, auto:a.auto, manual:a.manual,
+                   pending:a.pending||0, at:Date.now() };
+  });
+  fbSet("results/"+normCode(g.code)+"/"+examId, out).catch(function(){});
+}
+
+/* ---------- تقرير الامتحان ---------- */
+function examReport(eid){
+  var e = examById(eid); if(!e) return;
+  var g = groupById(e.gid), studs = groupStudents(e.gid), o = onlineStats(e);
+  var w = window.open("","_blank");
+  if(!w){ toast("اسمح بالنوافذ المنبثقة"); return; }
+  var rows = studs.map(function(st){
+    var a = o.byStu[st.id];
+    if(!a) return '<tr><td>'+esc(st.name)+'</td><td colspan="6">ما دخلش</td></tr>';
+    a = gradeAttempt(a);
+    var pct = o.total? Math.round(a.total/o.total*100) : 0;
+    var dur = a.submittedAt? Math.round((a.submittedAt-a.startedAt)/60000)+" د" : "—";
+    return '<tr><td>'+esc(st.name)+'</td>'+
+      '<td>'+(a.startedAt? new Date(a.startedAt).toLocaleString("ar-EG"):"—")+'</td>'+
+      '<td>'+(a.submittedAt? new Date(a.submittedAt).toLocaleString("ar-EG"):"لسه")+'</td>'+
+      '<td>'+dur+'</td><td>'+a.auto+'</td><td>'+a.manual+'</td>'+
+      '<td><b>'+a.total+'</b> ('+pct+'%)</td>'+
+      '<td>'+(a.pending? "في انتظار التصحيح" : (pct>=50?"ناجح":"راسب"))+'</td></tr>';
+  }).join("");
+  w.document.write('<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8">'+
+    '<title>تقرير: '+esc(e.title)+'</title><style>'+
+    'body{font-family:system-ui,sans-serif;padding:20px;color:#0E1A2B}'+
+    'h1{font-size:20px;margin:0 0 4px}table{width:100%;border-collapse:collapse;margin-top:14px;font-size:12px}'+
+    'th,td{padding:7px;border:1px solid #ccc;text-align:right}th{background:#EEF3F2}'+
+    '.hd{text-align:center;border-bottom:2px solid #014A59;padding-bottom:8px;margin-bottom:14px}'+
+    '.st{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}'+
+    '.st div{border:1px solid #ccc;border-radius:8px;padding:8px 14px;font-size:12px}'+
+    '.st b{display:block;font-size:17px}'+
+    '</style></head><body>'+
+    '<div class="hd"><h1>'+esc(DB.meta.name||"")+' — '+esc(DB.meta.subject||"")+'</h1>'+
+    '<div style="font-size:14px;font-weight:bold">تقرير امتحان: '+esc(e.title)+'</div>'+
+    '<div style="font-size:12px;color:#666">'+esc(g?g.name:"")+' · '+fmtD(today())+'</div></div>'+
+    '<div class="st">'+
+      '<div>عدد الطلاب<b>'+o.students+'</b></div>'+
+      '<div>بدأوا<b>'+o.started+'</b></div>'+
+      '<div>سلّموا<b>'+o.submitted+'</b></div>'+
+      '<div>ما دخلوش<b>'+o.notStarted+'</b></div>'+
+      '<div>مكتمل التصحيح<b>'+o.done+'</b></div>'+
+      '<div>في انتظار التصحيح<b>'+o.pending+'</b></div>'+
+      '<div>أعلى درجة<b>'+(o.max!=null?o.max:"—")+'</b></div>'+
+      '<div>أقل درجة<b>'+(o.min!=null?o.min:"—")+'</b></div>'+
+      '<div>المتوسط<b>'+(o.avg!=null?o.avg:"—")+'</b></div>'+
+      '<div>ناجح<b>'+o.pass+'</b></div>'+
+      '<div>راسب<b>'+o.fail+'</b></div>'+
+      '<div>نسبة النجاح<b>'+o.passPct+'%</b></div>'+
+    '</div>'+
+    '<table><thead><tr><th>الطالب</th><th>البداية</th><th>التسليم</th><th>المدة</th>'+
+    '<th>تلقائي</th><th>يدوي</th><th>النهائي</th><th>الحالة</th></tr></thead>'+
+    '<tbody>'+rows+'</tbody></table></body></html>');
+  w.document.close();
+  setTimeout(function(){ w.print(); }, 500);
+}
+function examCsv(eid){
+  var e = examById(eid); if(!e) return;
+  var studs = groupStudents(e.gid), o = onlineStats(e);
+  var rows = [["الطالب","البداية","التسليم","تلقائي","يدوي","النهائي","من","النسبة","الحالة"]];
+  studs.forEach(function(st){
+    var a = o.byStu[st.id];
+    if(!a){ rows.push([st.name,"","","","","","","","ما دخلش"]); return; }
+    a = gradeAttempt(a);
+    var pct = o.total? Math.round(a.total/o.total*100) : 0;
+    rows.push([st.name,
+      a.startedAt? new Date(a.startedAt).toLocaleString("ar-EG"):"",
+      a.submittedAt? new Date(a.submittedAt).toLocaleString("ar-EG"):"",
+      a.auto, a.manual, a.total, o.total, pct+"%",
+      a.pending? "في انتظار التصحيح" : (pct>=50?"ناجح":"راسب")]);
+  });
+  dl("نتائج-"+e.title+".csv", rows.map(function(r){
+    return r.map(function(c){ return '"'+String(c==null?"":c).replace(/"/g,'""')+'"'; }).join(",");
+  }).join("\n"), "text/csv;charset=utf-8");
+  toast("اتصدّر");
+}
+
 /* ---------- إيصال ---------- */
 function printReceipt(sid){
   var s = studentById(sid); if(!s) return;
@@ -4194,6 +5249,21 @@ document.addEventListener("click", function(e){
 document.addEventListener("input", function(e){
   var el = e.target;
   if(el.id==="imp_t"){ UI.impText = el.value; return; }
+  /* إجابة نصية أو مقالية — بتتحفظ مع الكتابة */
+  if(el.dataset && el.dataset.act==="stuAnsBox"){
+    var e2 = (GATE.exams||[]).filter(function(x){ return x.id===UI.takeId; })[0];
+    var a2 = UI.attempt;
+    if(!e2 || !a2 || a2.submittedAt) return;
+    var qs2 = (e2.qs||[]).slice().sort(function(x,y){ return num(x.order,0)-num(y.order,0); });
+    var q2 = qs2[UI.qi||0];
+    if(!q2) return;
+    a2.answers = a2.answers || {};
+    a2.answers[q2.id] = el.value;
+    a2.savedAt = Date.now();
+    clearTimeout(window._ansT);
+    window._ansT = setTimeout(function(){ saveStuAttempt(a2); }, 500);
+    return;
+  }
   if(!el.dataset || el.dataset.act!=="setQ") return;
   UI.q = el.value;
   clearTimeout(window._q);
@@ -4207,6 +5277,34 @@ document.addEventListener("change", function(e){
   var el = e.target;
   if(el.dataset && el.dataset.act==="setDate"){ UI.date = el.value; render(); }
   if(el.dataset && el.dataset.act==="scanG"){ UI.scanG = el.value; }
+  /* المدرّس بيرصد درجة سؤال يدوي */
+  if(el.dataset && (el.dataset.act==="setQMark" || el.dataset.act==="setQNote")){
+    var at = attemptById(el.dataset.a);
+    if(!at) return;
+    if(el.dataset.act==="setQMark"){
+      at.marks = at.marks || {};
+      var v2 = String(el.value).trim();
+      if(v2==="") delete at.marks[el.dataset.q];
+      else at.marks[el.dataset.q] = Math.max(0, num(v2,0));
+    }else{
+      at.notes = at.notes || {};
+      at.notes[el.dataset.q] = el.value;
+    }
+    gradeAttempt(at);
+    saveSync(); pushResults(at.examId); render();
+  }
+  /* نوع السؤال بيغيّر الحقول الظاهرة */
+  if(el.id==="q_ty"){
+    ["mcq","tf","text","essay"].forEach(function(t){
+      var box = document.getElementById("q_"+t);
+      if(box) box.style.display = (el.value===t) ? "block" : "none";
+    });
+    var gr = document.getElementById("q_gr");
+    if(gr && el.value==="essay"){ gr.value="manual"; gr.disabled=true; }
+    else if(gr){ gr.disabled=false; }
+  }
+  /* إجابة الطالب: اختيار من متعدد */
+  if(el.dataset && el.dataset.act==="stuAns"){ setStuAns(el.value); }
   /* رصد درجة امتحان */
   if(el.dataset && el.dataset.act==="setMark"){
     var ex = examById(el.dataset.e);
@@ -4288,6 +5386,22 @@ window.addEventListener("appinstalled", function(){ INSTALL=null; });
 window.__booted = true;
 try{ clearTimeout(window.__sosT); }catch(e){}
 var __sos = document.getElementById("sos"); if(__sos) __sos.style.display = "none";
+
+/* ============================================================
+   مؤقت الامتحان — بيسلّم تلقائيًا لما الوقت يخلص
+   ============================================================ */
+setInterval(function(){
+  if(!UI.take || !UI.attempt) return;
+  var e = (GATE.exams||[]).filter(function(x){ return x.id===UI.takeId; })[0];
+  if(!e) return;
+  var left = attemptLeftStu(UI.attempt, e);
+  if(left<=0 && !UI.attempt.submittedAt){
+    submitAttempt();
+    toast("انتهى الوقت — اتسلّم الامتحان تلقائيًا");
+    return;
+  }
+  if(num(e.mins,0) && left<=60) render();
+}, 1000);
 
 load();
 /* لو القفل شغّال، البرنامج يفتح مقفول */
