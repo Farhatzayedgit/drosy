@@ -92,6 +92,10 @@ h1,h2,h3,.dsp{font-family:Cairo,system-ui,sans-serif;font-weight:800;margin:0;li
 .side .nv .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
 .side .nv .b{font-size:10.5px;padding:2px 7px;border-radius:999px;background:var(--bad);
               color:#fff;font-weight:800;flex:0 0 auto}
+/* عدّاد المحتوى — رمادي، وبيبهت لما يكون صفر */
+.side .nv .c{font-size:11px;padding:2px 8px;border-radius:999px;background:var(--line2);
+             color:var(--mut);font-weight:800;flex:0 0 auto;min-width:26px;text-align:center}
+.side .nv.on .c{background:rgba(14,135,126,.16);color:var(--seal)}
 .scrim{position:fixed;inset:0;background:rgba(1,74,89,.45);z-index:45;opacity:0;
        pointer-events:none;transition:opacity .22s}
 .scrim.on{opacity:1;pointer-events:auto}
@@ -345,7 +349,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "3.0";
+var APP_VER = "3.1";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -1125,7 +1129,28 @@ var MORE = [
 function drawSide(){
   var due = dueReminders().length;
   var bk  = (DB.bookings||[]).filter(function(b){ return b.status!=="done" && b.status!=="no"; }).length;
+  /* ============================================================
+     عدّاد جنب كل قسم — عشان تعرف بنظرة فيه إيه، والفاضي يبان
+     إنه فاضي مش معطّل.
+     ============================================================ */
   var badge = { remind:due, book:bk };
+  var cnt = {
+    home:   groupToday(today()).length,
+    sesh:   (function(){ var n3=0; for(var k in DB.sessions) n3++; return n3; })(),
+    qr:     activeStudents().length,
+    groups: DB.groups.filter(function(g){ return g.status!=="off"; }).length,
+    studs:  activeStudents().length,
+    fams:   DB.families.length,
+    exams:  DB.exams.length,
+    tasks:  DB.tasks.length,
+    honor:  honorBoard().length,
+    comm:   (DB.notices||[]).length,
+    book:   (DB.bookings||[]).length,
+    remind: (DB.reminders||[]).filter(function(r){ return !r.done; }).length,
+    books:  DB.books.length,
+    years:  DB.years.length,
+    arch:   archivedStudents().length + archivedGroups().length
+  };
   var h = '<div class="sh"><div class="lg">π</div>'+
     '<b>دروسي<small>'+esc(DB.meta.name||"")+'</small></b>'+
     '<button class="x" data-act="closeSide" style="background:rgba(255,255,255,.14);'+
@@ -1134,9 +1159,12 @@ function drawSide(){
     h += '<div class="grp">'+esc(sec.g)+'</div>';
     sec.items.forEach(function(it){
       var b2 = badge[it.id];
+      var c2 = cnt[it.id];
       h += '<button class="nv'+(UI.tab===it.id?" on":"")+'" data-act="go" data-t="'+it.id+'">'+
         '<span class="i">'+it.i+'</span><span class="t">'+esc(it.n)+'</span>'+
-        (b2? '<span class="b">'+ar(b2)+'</span>':'')+'</button>';
+        (b2 ? '<span class="b">'+ar(b2)+'</span>'
+            : (c2!==undefined ? '<span class="c">'+ar(c2)+'</span>' : ''))+
+        '</button>';
     });
   });
   h += '<div class="grp">البرنامج</div>'+
