@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "4.2";
+var APP_VER = "4.3";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -490,16 +490,44 @@ function yearNow(){
   /* السنة الدراسية بتبدأ سبتمبر */
   return (d.getMonth()+1 >= 9) ? y+"/"+(y+1) : (y-1)+"/"+y;
 }
+/* ============================================================
+   ضبط بنية القاعدة
+   الفايربيز بيحذف القوايم الفاضية، فالبيانات بترجع من السحابة
+   وناقصة قوايم — وأول شاشة بتحاول تقراها بتقع بخطأ
+   «Cannot read properties of undefined».
+   الدالة دي بتتنادى بعد أي تحميل (محلي أو سحابي أو استرجاع نسخة)
+   وبتضمن إن كل قايمة وكل حقل موجودين.
+   ============================================================ */
+var DB_LISTS = ["groups","students","pays","bookings","notices","sesDue",
+                "years","res","attempts","families","exams","tasks",
+                "books","sales","reminders"];
+function normalizeDB(){
+  if(!DB || typeof DB!=="object") DB = blank();
+  var d = blank();
+  if(!DB.meta || typeof DB.meta!=="object") DB.meta = d.meta;
+  Object.keys(d.meta).forEach(function(k){
+    if(DB.meta[k]===undefined) DB.meta[k] = d.meta[k];
+  });
+  DB_LISTS.forEach(function(k){ if(!Array.isArray(DB[k])) DB[k] = []; });
+  if(!DB.sessions || typeof DB.sessions!=="object" || Array.isArray(DB.sessions)) DB.sessions = {};
+  if(!DB.lock || typeof DB.lock!=="object") DB.lock = { on:false, pin:"", bio:false };
+  if(!DB.seq) DB.seq = 1;
+  if(typeof DB.curYear!=="string") DB.curYear = "";
+  /* الحقول اللي جوه العناصر ممكن تكون ناقصة كمان */
+  DB.exams.forEach(function(e){ if(!Array.isArray(e.qs)) e.qs=[]; if(!e.marks) e.marks={}; });
+  DB.attempts.forEach(function(a){
+    if(!a.answers) a.answers={}; if(!a.marks) a.marks={}; if(!a.notes) a.notes={}; });
+  DB.tasks.forEach(function(t){ if(!t.done) t.done={}; });
+  DB.groups.forEach(function(g){ if(!Array.isArray(g.days)) g.days=[]; });
+  DB.students.forEach(function(st){ if(!Array.isArray(st.groups)) st.groups=[]; });
+  DB.families.forEach(function(f){ if(!f.code) f.code=genFamCode(); });
+  return DB;
+}
 function load(){
   try{ var r = localStorage.getItem(KEY); DB = r ? JSON.parse(r) : blank(); }
   catch(e){ DB = blank(); }
-  if(!DB.meta) DB = blank();
-  ["groups","students","pays","bookings","notices",
-   "families","exams","tasks","books","sales","reminders","sesDue",
-   "years","res","attempts"].forEach(function(k){
-    if(!Array.isArray(DB[k])) DB[k] = []; });
-  if(!DB.sessions) DB.sessions = {};
-  if(!DB.seq) DB.seq = 1;
+  if(!DB || !DB.meta) DB = blank();
+  normalizeDB();
   ensureCodes();
 }
 function save(){ try{ localStorage.setItem(KEY, JSON.stringify(DB)); }catch(e){ toast("مساحة التخزين ممتلئة"); } }
@@ -628,8 +656,7 @@ function syncDown(){
   return fbGet("private/db").then(function(v){
     if(!v || !v.meta) return false;
     DB = v;
-    ["groups","students","pays"].forEach(function(k){ if(!Array.isArray(DB[k])) DB[k]=[]; });
-    if(!DB.sessions) DB.sessions = {};
+    normalizeDB();                      /* لازم قبل أي رسم — ده كان سبب العطل */
     ensureCodes(); save(); return true;
   }).catch(function(){ return false; });
 }
@@ -5019,7 +5046,7 @@ function restore(){
         var o = JSON.parse(r.result);
         if(!o || !o.meta || !Array.isArray(o.groups)) throw new Error("ملف مش سليم");
         if(!confirm("استرجاع النسخة دي؟\n\nهتستبدل كل البيانات الحالية.")) return;
-        DB = o; save(); UI={tab:"home",sub:null,q:"",gid:"",date:""}; render();
+        DB = o; normalizeDB(); save(); UI={tab:"home",sub:null,q:"",gid:"",date:""}; render();
         toast("اترجّعت النسخة");
       }catch(e){ toast("الملف مش سليم"); }
     };
