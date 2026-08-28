@@ -283,6 +283,52 @@ th{background:var(--paper);font-weight:800;font-size:12px;color:var(--mut);font-
 
 <div class="wrap"><div id="view"></div></div>
 
+<!-- شبكة أمان: لو البرنامج مااشتغلش (نسخة مخلوطة أو خطأ)، الرسالة دي
+     بتظهر بزرار إصلاح. بتختفي تلقائيًا أول ما البرنامج يشتغل. -->
+<div id="sos" style="display:none;position:fixed;inset:0;z-index:999;background:#F6F7F5;
+     padding:26px 18px;font-family:system-ui,sans-serif;text-align:center;overflow:auto">
+  <div style="max-width:380px;margin:40px auto;background:#fff;border:1px solid #DCE6E4;
+       border-radius:16px;padding:22px">
+    <div style="font-size:40px">⚠️</div>
+    <h2 style="font-family:system-ui;margin:10px 0 6px;font-size:19px;color:#014A59">
+      البرنامج مااشتغلش</h2>
+    <p style="color:#6A7F80;font-size:14px;line-height:1.7;margin:0 0 16px">
+      غالبًا فيه نسخة قديمة متخزّنة على جهازك متعارضة مع الجديدة.<br>
+      اضغط الزرار ده — <b>بياناتك مش هتتلمس</b>.</p>
+    <button onclick="sosFix()" style="width:100%;padding:14px;border:0;border-radius:12px;
+      background:#0E877E;color:#fff;font-size:15px;font-weight:700;cursor:pointer">
+      ↻ صلّح وحدّث البرنامج</button>
+    <div id="sosErr" style="margin-top:14px;font-size:11px;color:#CC3B3B;
+         direction:ltr;text-align:left;word-break:break-all"></div>
+  </div>
+</div>
+<script>
+/* بيمسح كل نسخة مخزّنة ويعيد التحميل — من غير ما يلمس البيانات */
+function sosFix(){
+  var jobs = [];
+  try{
+    if(window.caches && caches.keys)
+      jobs.push(caches.keys().then(function(ks){
+        return Promise.all(ks.map(function(k){ return caches.delete(k); })); }));
+    if(navigator.serviceWorker && navigator.serviceWorker.getRegistrations)
+      jobs.push(navigator.serviceWorker.getRegistrations().then(function(rs){
+        return Promise.all(rs.map(function(r){ return r.unregister(); })); }));
+  }catch(e){}
+  Promise.all(jobs).catch(function(){}).then(function(){
+    location.replace(location.pathname + "?v=" + Date.now());
+  });
+}
+/* لو البرنامج مااشتغلش خلال ٣ ثواني، نظهر الشاشة */
+window.__booted = false;
+window.__sosT = setTimeout(function(){
+  if(!window.__booted) document.getElementById("sos").style.display = "block";
+}, 3000);
+window.addEventListener("error", function(e){
+  var box = document.getElementById("sosErr");
+  if(box && e.message) box.textContent = String(e.message).slice(0,180);
+  if(!window.__booted) document.getElementById("sos").style.display = "block";
+});
+</script>
 <div class="scrim" id="scrim" data-act="closeSide"></div>
 <aside class="side" id="side"></aside>
 <div class="mask" id="mask"><div class="modal" id="modal"></div></div>
@@ -349,7 +395,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "3.1";
+var APP_VER = "3.2";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -4128,6 +4174,11 @@ window.addEventListener("beforeinstallprompt", function(e){
   if(b) b.classList.remove("hide");
 });
 window.addEventListener("appinstalled", function(){ INSTALL=null; });
+
+/* البرنامج اشتغل — نلغي شبكة الأمان */
+window.__booted = true;
+try{ clearTimeout(window.__sosT); }catch(e){}
+var __sos = document.getElementById("sos"); if(__sos) __sos.style.display = "none";
 
 load();
 /* لو القفل شغّال، البرنامج يفتح مقفول */

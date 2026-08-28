@@ -1,17 +1,21 @@
 /* ============================================================
    عامل التخزين — «دروسي»
-   غيّر رقم الإصدار مع كل نسخة جديدة عشان المتصفح ياخدها فورًا.
-   الاستراتيجية: الشبكة أولًا للملفات الأساسية، والكاش احتياطي
-   لو النت مقطوع — عشان المستخدم ما يفضلش شايف نسخة قديمة.
+   الصفحة نفسها (index.html) مش بتتخزّن خالص — بتتجاب من الشبكة
+   دايمًا. ده بيمنع أهم مشكلة: نسخة HTML قديمة مع جافاسكريبت
+   جديد (أو العكس) فالبرنامج يفتح والأزرار ماتستجيبش.
+   الكاش للحالة الوحيدة اللي محتاجينه فيها: النت مقطوع تمامًا.
    ============================================================ */
-var VER   = "v8";
+var VER   = "v10";
 var CACHE = "drosy-" + VER;
+var PAGE  = "./index.html";
 
 self.addEventListener("install", function(e){
-  self.skipWaiting();                       /* النسخة الجديدة تشتغل فورًا */
-  e.waitUntil(caches.open(CACHE).then(function(c){
-    return c.addAll(["./","./index.html"]).catch(function(){});
-  }));
+  self.skipWaiting();
+  e.waitUntil(
+    caches.open(CACHE).then(function(c){
+      return c.add(new Request(PAGE, { cache:"reload" })).catch(function(){});
+    })
+  );
 });
 
 self.addEventListener("activate", function(e){
@@ -27,33 +31,36 @@ self.addEventListener("message", function(e){
 });
 
 self.addEventListener("fetch", function(e){
-  var u = e.request.url;
-  if(e.request.method!=="GET") return;
-  /* فايربيز وجوجل: من الشبكة دايمًا */
-  if(/firebase|googleapis|gstatic|wa\.me/.test(u)) return;
+  var req = e.request;
+  if(req.method!=="GET") return;
+  /* فايربيز وجوجل والواتساب: من الشبكة دايمًا، من غير أي تدخّل */
+  if(/firebase|googleapis|gstatic|wa\.me|jsdelivr/.test(req.url)) return;
 
-  /* الصفحة نفسها: الشبكة أولًا — عشان التحديثات توصل */
-  var isPage = e.request.mode==="navigate" || /\.html($|\?)/.test(u) || u.endsWith("/");
+  var isPage = req.mode==="navigate" ||
+               /\.html($|\?)/.test(req.url) ||
+               req.url.endsWith("/");
+
   if(isPage){
+    /* الشبكة أولًا وبالإجبار — والكاش احتياطي لو مفيش نت */
     e.respondWith(
-      fetch(e.request).then(function(r){
+      fetch(new Request(req.url, { cache:"reload" })).then(function(r){
         var cp = r.clone();
-        caches.open(CACHE).then(function(c){ c.put(e.request, cp); }).catch(function(){});
+        caches.open(CACHE).then(function(c){ c.put(PAGE, cp); }).catch(function(){});
         return r;
       }).catch(function(){
-        return caches.match(e.request).then(function(m){ return m || caches.match("./index.html"); });
+        return caches.match(PAGE).then(function(m){
+          return m || new Response("مفيش اتصال", { headers:{ "Content-Type":"text/plain; charset=utf-8" } });
+        });
       })
     );
     return;
   }
-  /* باقي الملفات: الكاش أولًا للسرعة */
+  /* باقي الملفات: الشبكة أولًا كمان — الملفات قليلة والفرق مش محسوس */
   e.respondWith(
-    caches.match(e.request).then(function(m){
-      return m || fetch(e.request).then(function(r){
-        var cp = r.clone();
-        caches.open(CACHE).then(function(c){ c.put(e.request, cp); }).catch(function(){});
-        return r;
-      });
-    })
+    fetch(req).then(function(r){
+      var cp = r.clone();
+      caches.open(CACHE).then(function(c){ c.put(req, cp); }).catch(function(){});
+      return r;
+    }).catch(function(){ return caches.match(req); })
   );
 });
