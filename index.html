@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "5.2";
+var APP_VER = "5.3";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -1452,6 +1452,8 @@ function billFrom(s, g){
   return a > b ? a : b;           /* الأحدث */
 }
 function billEligible(s, g, date){
+  /* معفي في التاريخ ده؟ مفيش مستحق خالص */
+  if(isExemptOn(s, date)) return false;
   var from = billFrom(s, g);
   if(!from) return false;         /* من غير تاريخ بداية مفيش مستحقات */
   return String(date) >= String(from);
@@ -1460,7 +1462,9 @@ function billEligible(s, g, date){
 function duesOf(sid, upto){
   upto = upto || today();
   var s = studentById(sid);
-  if(!s || payModeOf(s)==="free") return [];
+  if(!s) return [];
+  /* معفي دلوقتي؟ مفيش أي مستحق حالي — والسجل القديم بيفضل محفوظ */
+  if(isExempt(s)) return [];
   var out = [];
   if(payModeOf(s)==="ses"){
     /* بالحصة: من الحصص المسجّلة — وجوه نافذة الاحتساب بس */
@@ -1485,7 +1489,7 @@ function duesOf(sid, upto){
         var mk = y+"-"+String(m).padStart(2,"0");
         var dueDate = mk+"-"+String(payday).padStart(2,"0");
         /* المستحق لازم يكون بعد البداية وقبل أو مع النهاردة */
-        if(dueDate <= upto && dueDate >= from){
+        if(dueDate <= upto && dueDate >= from && !isExemptOn(s, dueDate)){
           var pd = payOfMonth(sid, g.id, m);
           out.push({ kind:"month", id:g.id+"|"+mk, gid:g.id, date:dueDate, mi:m,
                      amount:num(g.fee), paid:!!pd, rest: pd?0:num(g.fee),
@@ -1527,6 +1531,7 @@ function allDues(){
   var t = today();
   var todayD = [], old = [];
   activeStudents().forEach(function(s){
+    if(isExempt(s)) return;                   /* مش في أي متأخرات */
     var bk = dueBuckets(s.id);
     bk.today.forEach(function(x){ x.s = s; todayD.push(x); });
     bk.old.forEach(function(x){ x.s = s; old.push(x); });
@@ -1545,7 +1550,7 @@ function groupsDueToday(){
     var studs = groupStudents(g.id);
     var need = 0, got = 0, cnt = 0;
     studs.forEach(function(s){
-      if(payModeOf(s)==="free") return;
+      if(isExempt(s)) return;                 /* المعفي بره التحصيل المتوقع */
       duesOf(s.id, t).forEach(function(d){
         if(d.gid!==g.id || d.date!==t) return;
         need += num(d.amount);
@@ -1596,6 +1601,44 @@ var PAY_MODES = [
   { id:"ses",   name:"بالحصة",  i:"◉" },
   { id:"free",  name:"معفي",    i:"★" }
 ];
+/* ============================================================
+   الإعفاء المالي — حالة مستقلة مش مستحق بصفر
+   الفرق مهم: طالب دفع كل حاجة رصيده صفر، وطالب معفي **مالوش
+   مستحق من الأساس**. النظام بيفرّق بينهم في كل شاشة.
+
+   الإعفاء له فترة: من تاريخ لتاريخ (أو مفتوح). الفترة اللي
+   الطالب كان فيها معفي **مبيتحسبش عنها مستحق أبدًا** — حتى لو
+   رجع يدفع بعدها. والسجل المالي القديم بيفضل محفوظ.
+   ============================================================ */
+var EX_REASONS = ["منحة","قرار إداري","حالة خاصة","خصم كامل","أخرى"];
+
+/* هل الطالب معفي في التاريخ ده؟ */
+function isExemptOn(s, date){
+  if(!s) return false;
+  date = date || today();
+  /* الحالة الحالية */
+  if(s.payMode === "free"){
+    var from = s.exFrom || "";
+    var to   = s.exTo   || "";
+    if(from && date < from) return false;      /* قبل بداية الإعفاء */
+    if(to && date > to)     return false;      /* بعد انتهائه */
+    return true;
+  }
+  /* رجع يدفع — بس فترة إعفائه السابقة لسه معفية */
+  if(s.exFrom && s.exTo)
+    return date >= s.exFrom && date <= s.exTo;
+  return false;
+}
+/* معفي دلوقتي؟ */
+function isExempt(s){ return isExemptOn(s, today()); }
+/* وصف حالة الإعفاء */
+function exemptInfo(s){
+  if(!s || !isExempt(s)) return null;
+  return { from: s.exFrom || "", to: s.exTo || "",
+           reason: s.exReason || "",
+           label: "معفي من الدفع" +
+             (s.exTo ? " حتى "+fmtD(s.exTo) : "") };
+}
 function payModeName(m){
   for(var i=0;i<PAY_MODES.length;i++) if(PAY_MODES[i].id===m) return PAY_MODES[i].name;
   return "بالشهر";
@@ -1661,6 +1704,8 @@ function sesDuesMonth(sid, gid, mk){
 /* حالة الدفع للطالب في المجموعة والشهر ده */
 function payStateOf(s, g, mk){
   var mode = payModeOf(s);
+  var ex = exemptInfo(s);
+  if(ex) return { mode:"free", label:ex.label, cls:"", due:0, paid:0, rest:0, n:0, ex:ex };
   if(mode==="free") return { mode:"free", label:"معفي", cls:"", due:0, paid:0, rest:0, n:0 };
   if(mode==="ses"){
     var rows = sesDuesMonth(s.id, g.id, mk);
@@ -1688,11 +1733,23 @@ function payStateOf(s, g, mk){
    لازم تفرّق بين الشهري وبالحصة — كانت بتحسب بالشهور دايمًا،
    فمجموعة بالحصة بـ٣٠ ج كانت بتطلع «٧٢٠ ج متأخر» (١٢ شهر × طالبين).
    ============================================================ */
+/* توزيع الطلاب على أنظمة الدفع */
+function payBreakdown(list){
+  var out = { ses:0, month:0, free:0, billable:0, total:0 };
+  (list||activeStudents()).forEach(function(s){
+    out.total++;
+    if(isExempt(s)){ out.free++; return; }
+    out.billable++;
+    if(payModeOf(s)==="ses") out.ses++; else out.month++;
+  });
+  return out;
+}
 function groupMoney(g, mk){
   mk = mk || curMonthKey();
   var studs = groupStudents(g.id);
   var paid = 0, rest = 0, paidN = 0, restN = 0, late = {}, free = 0;
   studs.forEach(function(s){
+    if(isExempt(s)){ free++; return; }        /* الحارس الأول */
     var st = payStateOf(s, g, mk);
     if(st.mode==="free"){ free++; return; }
     paid += st.paid; rest += st.rest;
@@ -2336,6 +2393,12 @@ function viewGroup(gid){
     stat("كود المجموعة", '<span style="letter-spacing:.08em">'+esc(g.code||"—")+'</span>',
          "المفتاح الثابت للاستيراد", "")+
     stat("الطلاب", ar(st.length), "", "")+
+    (function(){
+      var B = payBreakdown(st);
+      return stat("أنظمة الدفع", ar(B.billable)+" خاضع",
+        (B.ses? ar(B.ses)+" بالحصة · ":"")+(B.month? ar(B.month)+" شهري":"")+
+        (B.free? " · "+ar(B.free)+" معفي":""), "");
+    })()+
     stat("بداية الاحتساب", fmtD(groupBillFrom(g)||today()),
          "مفيش مستحقات قبل كده", "")+
     stat("السعر", money(g.fee), (g.mode==="ses"?"للحصة":"للشهر")+
@@ -2396,7 +2459,7 @@ function viewGroup(gid){
             esc(tk? HW_STATES.filter(function(x){ return x.id===tk; })[0].n : "واجب")+'</button>'+
           /* الدفع */
           (P.mode==="free"
-            ? '<span class="tag" style="padding:8px 12px">معفي من الدفع</span>'
+            ? '<span class="tag ok" style="padding:8px 12px">★ '+esc(P.label)+'</span>'
             : (P.rest
               ? '<button class="btn ok sm" data-act="gPay" data-g="'+gid+'" data-s="'+s.id+
                 '" data-m="'+mk+'" style="padding:7px 11px">₤ سدّد '+money(P.rest)+'</button>'
@@ -2586,17 +2649,18 @@ function viewStudent(sid){
   var gs = studentGroups(s), d = studentDue(s);
   var h = back("الطلاب","backStuds");
   var _pm = payModeOf(s);
+  var _ex = exemptInfo(s);
   h += pageHd(s.name,
     esc([s.grade, s.phone].filter(Boolean).join(" · "))+
-    ' <span class="tag '+(_pm==="free"?"ok":"")+'" style="margin-inline-start:6px">'+
-    esc(payModeName(_pm))+'</span>',
+    ' <span class="tag '+(_ex?"ok":"")+'" style="margin-inline-start:6px">'+
+    esc(_ex ? _ex.label : payModeName(_pm))+'</span>',
     '<button class="btn ghost sm" data-act="editStu" data-s="'+sid+'">تعديل</button>'+
     (contactOf(s)? '<button class="btn sm" data-act="waStu" data-s="'+sid+'" data-k="plain">✆ واتساب</button>':'')+
     (contactOf(s) && d.rest? '<button class="btn ghost sm" data-act="waDue" data-s="'+sid+'">✆ تذكير بالمستحق</button>':'')+
     (contactOf(s)? '<a class="btn ghost sm" href="tel:'+esc(contactOf(s))+'" style="text-decoration:none">☎ اتصال</a>':'')+
     '<button class="btn ghost sm" data-act="stuReport" data-s="'+sid+'">▦ تقرير شامل</button>');
 
-  h += '<div class="stats">'+
+  if(!_ex) h += '<div class="stats">'+
     stat("المستحق", money(d.due), "من أول اشتراكه", "")+
     stat("المدفوع", money(d.paid), "", "money")+
     stat("المتبقي", money(d.rest), d.rest? "متأخر" : "سديد", d.rest?"late":"")+
@@ -2687,6 +2751,31 @@ function viewStudent(sid){
         '<span><span class="mo next" style="width:12px;height:12px;display:inline-block;vertical-align:-2px"></span> لسه ما جاش</span>'+
       '</div></div></div>';
   });
+
+  /* ============================================================
+     الحالة المالية — الإعفاء بيبان كحالة مش كأرقام صفر
+     ============================================================ */
+  if(_ex){
+    h += '<div class="card"><div class="hd"><h3>الحالة المالية</h3>'+
+      '<span class="tag ok">معفي</span></div><div class="bd">'+
+      '<div class="note ok"><div style="font-size:30px;text-align:center">★</div>'+
+      '<b style="display:block;text-align:center;font-size:16px;margin-bottom:6px">معفي من الدفع</b>'+
+      '<div style="text-align:center">'+
+        (_ex.from? 'من '+fmtD(_ex.from) : '')+
+        (_ex.to? ' إلى '+fmtD(_ex.to) : (_ex.from?' — مفتوح':''))+
+        (_ex.reason? '<br>السبب: <b>'+esc(_ex.reason)+'</b>' : '')+
+      '</div></div>';
+    /* سجل مالي قديم — لو موجود فعلًا */
+    var oldPays = DB.pays.filter(function(p){ return p.sid===sid; });
+    if(oldPays.length){
+      var tot = oldPays.reduce(function(a,x){ return a+num(x.amount); },0);
+      h += '<div class="sep"></div>'+
+        '<div class="mut" style="font-size:12.5px;margin-bottom:7px">'+
+        'سجل مالي سابق (قبل الإعفاء) — محفوظ للرجوع ليه</div>'+
+        '<div class="note">اتدفع <b>'+money(tot)+'</b> في '+ar(oldPays.length)+' دفعة</div>';
+    }
+    h += '</div></div>';
+  }
 
   /* سجل حضور الطالب — كل حصة وحالته فيها */
   var hist = [];
@@ -4156,7 +4245,26 @@ function modalStudent(sid){
       '<small class="mut" style="font-size:11.5px">'+
       '<b>بالحصة</b>: مستحق لكل حصة يحضرها · '+
       '<b>بالشهر</b>: مستحق واحد للشهر الحالي · '+
-      '<b>معفي</b>: مفيش مستحقات</small></label>'+
+      '<b>معفي</b>: مفيش مستحقات من الأساس</small></label>'+
+    /* حقول الإعفاء — بتظهر لما يختار «معفي» */
+    '<div id="s_exBox" style="display:'+((s&&payModeOf(s)==="free")?"block":"none")+'">'+
+      '<div class="note ok" style="margin-bottom:10px">الطالب المعفي بيفضل في المجموعة '+
+        'بشكل كامل: حضور وواجبات وامتحانات ودرجات. الإعفاء بيأثر على '+
+        '<b>الفلوس بس</b>.</div>'+
+      '<div class="grid2">'+
+      '<label class="f"><span>بداية الإعفاء</span>'+
+        '<input type="date" id="s_exf" value="'+esc(s&&s.exFrom? s.exFrom : today())+'"></label>'+
+      '<label class="f"><span>نهاية الإعفاء (اختياري)</span>'+
+        '<input type="date" id="s_ext" value="'+esc(s&&s.exTo? s.exTo : "")+'"></label>'+
+      '</div>'+
+      '<label class="f"><span>سبب الإعفاء</span><select id="s_exr">'+
+        '<option value="">— بدون سبب —</option>'+
+        EX_REASONS.map(function(r){
+          return '<option value="'+esc(r)+'"'+(s&&s.exReason===r?" selected":"")+'>'+esc(r)+'</option>';
+        }).join("")+'</select></label>'+
+      '<div class="note">سيبت النهاية فاضية؟ الإعفاء مفتوح لحد ما تغيّره. '+
+        'ولو حطيت تاريخ، الطالب بيرجع لنظام دفعه تلقائيًا بعده.</div>'+
+    '</div>'+
     (DB.families.length? '<label class="f"><span>الأسرة (اختياري)</span><select id="s_fam">'+
       '<option value="">— مش مربوط بأسرة —</option>'+
       DB.families.map(function(f2){
@@ -4191,7 +4299,25 @@ function saveStu(){
   s.joinDate = val("s_jd") || s.joinDate || today();
   s.joinMonth = num(String(s.joinDate).slice(5,7), schoolMonths()[0]);
   var fv = val("s_fam"); if(fv) s.famId = fv; else delete s.famId;
+  /* ============================================================
+     تغيير الحالة المالية
+     الإعفاء بيبدأ من تاريخ التغيير — مفيش إعفاء بأثر رجعي،
+     ومفيش مستحقات بأثر رجعي عن فترة الإعفاء.
+     ============================================================ */
+  var oldMode = s.payMode || "";
   s.payMode = val("s_pay") || "month";
+  if(s.payMode === "free"){
+    s.exFrom   = val("s_exf") || s.exFrom || today();
+    s.exTo     = val("s_ext") || "";
+    s.exReason = val("s_exr") || "";
+  }else if(oldMode === "free"){
+    /* رجع يدفع — بنقفل فترة الإعفاء عند النهاردة عشان
+       الفترة اللي فاتت تفضل معفية ومايتحسبش عنها مستحق */
+    if(s.exFrom && !s.exTo){
+      var y2 = new Date(); y2.setDate(y2.getDate()-1);
+      s.exTo = iso(y2);
+    }
+  }
   s.note = val("s_note").trim();
   saveSync(); closeModal(); render();
   toast(sid? "اتحفظ" : "اتضاف الطالب");
@@ -5821,7 +5947,8 @@ var ACTS = {
   },
   waDue: function(el){
     var s=studentById(el.dataset.s); if(!s) return;
-    if(payModeOf(s)==="free"){ toast("الطالب معفي من الدفع"); return; }
+    /* الحارس الوحيد لكل التذكيرات المالية */
+    if(isExempt(s)){ toast("الطالب معفي من الدفع — مفيش تذكير مالي"); return; }
     var d=studentDue(s);
     if(!d.rest){ toast("الطالب سديد"); return; }
     if(!contactOf(s)){ toast("مفيش رقم مسجّل"); return; }
@@ -7091,6 +7218,11 @@ document.addEventListener("change", function(e){
     saveSync(); pushResults(at.examId); render();
   }
   /* نوع السؤال بيغيّر الحقول الظاهرة */
+  /* حقول الإعفاء تظهر مع اختيار «معفي» */
+  if(el.id==="s_pay"){
+    var box = document.getElementById("s_exBox");
+    if(box) box.style.display = (el.value==="free") ? "block" : "none";
+  }
   if(el.id==="q_ty"){
     ["mcq","tf","text","essay"].forEach(function(t){
       var box = document.getElementById("q_"+t);
