@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "5.1";
+var APP_VER = "5.2";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -531,6 +531,7 @@ function load(){
   ensureCodes();
   migratePayModes();        /* ترحيل آمن — بيملا الناقص بس */
   migratePays();            /* توحيد سجل الدفعات */
+  migrateBillDates();       /* تواريخ بداية الاحتساب */
 }
 function save(){ try{ localStorage.setItem(KEY, JSON.stringify(DB)); }catch(e){ toast("مساحة التخزين ممتلئة"); } }
 function uid(p){ return (p||"i") + (DB.seq++) + Math.random().toString(36).slice(2,6); }
@@ -1236,19 +1237,16 @@ function dueMonths(s, g){
 function studentDue(s){
   var mode = payModeOf(s);
   if(mode==="free") return { due:0, paid:0, rest:0, mode:"free" };
-  var due = 0, paid = 0;
-  if(mode==="ses"){
-    var sd = sesDueOf(s.id);
-    due = sd.due; paid = sd.paid;
-  }else{
-    studentGroups(s).forEach(function(g){
-      dueMonths(s,g).forEach(function(mi){
-        due += num(g.fee);
-        if(isPaid(s.id,g.id,mi)) paid += num(g.fee);
-      });
-    });
-  }
-  return { due:due, paid:paid, rest: Math.max(0, due-paid), mode:mode };
+  /* ============================================================
+     المستحقات لحد النهاردة — بس بنضم كل دفعاته الفعلية كمان،
+     عشان لو دفع مقدّم لشهر جاي يظهر في المدفوع مش يختفي.
+     ============================================================ */
+  var rows = duesOf(s.id, today());
+  var due  = rows.reduce(function(a,x){ return a+num(x.amount); }, 0);
+  var rest = rows.reduce(function(a,x){ return a+num(x.rest); }, 0);
+  var paid = 0;
+  DB.pays.forEach(function(p){ if(p.sid===s.id) paid += num(p.amount); });
+  return { due: Math.max(due, paid), paid: paid, rest: rest, mode: mode };
 }
 function lateStudents(){
   return activeStudents().filter(function(s){ return studentDue(s).rest > 0; })
@@ -1304,6 +1302,7 @@ function endSes(gid, d){
     var att = DB.sessions[k].att || {};
     groupStudents(gid).forEach(function(s){
       if(payModeOf(s) !== "ses") return;
+      if(!billEligible(s, g, d)) return;    /* قبل بداية الاحتساب */
       var v = att[s.id];
       if(v!=="P" && v!=="L") return;
       var has = (DB.sesDue||[]).some(function(x){
@@ -1359,6 +1358,38 @@ function payOfDue(dueId){
 function duePaid(due){ return !!payOfDue(due.id); }
 function dueRest(due){ return duePaid(due) ? 0 : num(due.amount); }
 /* ترحيل: أي حصة معلّمة مدفوعة من غير سجل → بنعملها سجل */
+/* ============================================================
+   ترحيل تواريخ الاحتساب
+   المجموعات القديمة مالهاش تاريخ بداية، فكان النظام بيحسب
+   بأثر رجعي لأول السنة الدراسية. بنحط لكل مجموعة تاريخ بداية
+   منطقي: أقدم حصة مرصودة فيها، وإلا تاريخ إنشائها، وإلا النهاردة.
+   البيانات القديمة مبتتحذفش — بس مبتدخلش الحساب.
+   ============================================================ */
+function migrateBillDates(){
+  var ch = 0;
+  DB.groups.forEach(function(g){
+    if(g.billFrom) return;
+    /* أقدم حصة مرصودة للمجموعة */
+    var first = "";
+    for(var k in DB.sessions){
+      var p = k.split("|");
+      if(p[0]!==g.id) continue;
+      if(!first || p[1] < first) first = p[1];
+    }
+    g.startDate = g.startDate || first || (g.at? iso(new Date(g.at)) : today());
+    g.billFrom  = g.startDate;
+    ch++;
+  });
+  /* الطلاب من غير تاريخ انضمام: بياخدوا بداية احتساب مجموعتهم */
+  DB.students.forEach(function(s){
+    if(s.joinDate) return;
+    var g = studentGroups(s)[0];
+    s.joinDate = (g && groupBillFrom(g)) || today();
+    ch++;
+  });
+  if(ch) save();
+  return ch;
+}
 function migratePays(){
   var ch = 0;
   (DB.sesDue||[]).forEach(function(x){
@@ -1379,31 +1410,82 @@ function migratePays(){
    المستحق بيتخزّن للحصة بس (لأنه مربوط بحصة حصلت فعلًا).
    ============================================================ */
 /* كل مستحقات الطالب لحد تاريخ معيّن */
+/* ============================================================
+   بداية احتساب المستحقات — المصدر الوحيد
+   المشكلة اللي كانت: الطالب من غير تاريخ انضمام كان بيترجّع
+   لأول السنة الدراسية، فالنظام يعمل ١٢ مستحق بأثر رجعي لطالب
+   بدأ من أسبوع.
+   دلوقتي البداية = **أحدث تاريخ** بين:
+     · تاريخ بداية احتساب المجموعة (billFrom)
+     · تاريخ انضمام الطالب (joinDate)
+   وأي تاريخ قبلها بيتجاهل في الحساب — من غير ما نحذف أي سجل.
+   ============================================================ */
+function groupBillFrom(g){
+  if(!g) return "";
+  return g.billFrom || g.startDate || "";
+}
+function studentJoin(s, gid){
+  if(!s) return "";
+  if(s.joinIn && s.joinIn[gid]) return s.joinIn[gid];
+  return s.joinDate || "";
+}
+function billFrom(s, g){
+  var a = groupBillFrom(g);
+  var b = studentJoin(s, g && g.id);
+  /* ============================================================
+     لو مفيش تواريخ خالص (بيانات اتحطت برمجيًا من غير ترحيل)،
+     بناخد أقدم حصة مرصودة للمجموعة كبداية معقولة — أدق بكتير
+     من الرجوع لأول السنة الدراسية.
+     ============================================================ */
+  if(!a && !b){
+    if(!g) return "";
+    var first = "";
+    for(var k in DB.sessions){
+      var p = k.split("|");
+      if(p[0]!==g.id) continue;
+      if(!first || p[1] < first) first = p[1];
+    }
+    return first || today();
+  }
+  if(!a) return b;
+  if(!b) return a;
+  return a > b ? a : b;           /* الأحدث */
+}
+function billEligible(s, g, date){
+  var from = billFrom(s, g);
+  if(!from) return false;         /* من غير تاريخ بداية مفيش مستحقات */
+  return String(date) >= String(from);
+}
+
 function duesOf(sid, upto){
   upto = upto || today();
   var s = studentById(sid);
   if(!s || payModeOf(s)==="free") return [];
   var out = [];
   if(payModeOf(s)==="ses"){
+    /* بالحصة: من الحصص المسجّلة — وجوه نافذة الاحتساب بس */
     (DB.sesDue||[]).forEach(function(x){
       if(x.sid!==sid) return;
       if(x.date > upto) return;
+      if(!billEligible(s, groupById(x.gid), x.date)) return;
       out.push({ kind:"ses", id:x.id, gid:x.gid, date:x.date,
                  amount:num(x.amount), paid:duePaid(x),
                  rest:dueRest(x), what:"حصة "+fmtD(x.date) });
     });
   }else{
+    /* شهري: من بداية الاحتساب لحد النهاردة — شهر بشهر */
     studentGroups(s).forEach(function(g){
-      var from = joinMonthKey(s);
+      var from = billFrom(s, g);
       if(!from) return;
+      var payday = Math.min(28, Math.max(1, num(g.payday,1)));
       var y = num(from.slice(0,4)), m = num(from.slice(5,7));
       var endY = num(upto.slice(0,4)), endM = num(upto.slice(5,7));
-      var payday = Math.min(28, Math.max(1, num(g.payday,1)));
       var guard = 0;
       while((y < endY || (y===endY && m <= endM)) && guard++ < 60){
         var mk = y+"-"+String(m).padStart(2,"0");
         var dueDate = mk+"-"+String(payday).padStart(2,"0");
-        if(dueDate <= upto){
+        /* المستحق لازم يكون بعد البداية وقبل أو مع النهاردة */
+        if(dueDate <= upto && dueDate >= from){
           var pd = payOfMonth(sid, g.id, m);
           out.push({ kind:"month", id:g.id+"|"+mk, gid:g.id, date:dueDate, mi:m,
                      amount:num(g.fee), paid:!!pd, rest: pd?0:num(g.fee),
@@ -1547,14 +1629,13 @@ function monthIdxOf(mk){ return num(String(mk).split("-")[1], 1); }
 function monthDue(s, g, mk){
   if(payModeOf(s)!=="month") return null;
   var mi = monthIdxOf(mk);
-  /* ============================================================
-     مستحق شهر واحد بس — للشهر المعروض.
-     البداية من **تاريخ اشتراك حقيقي** (سنة وشهر). لو الطالب
-     قديم ومالوش تاريخ، بناخد أول شهر في السنة الدراسية الحالية
-     كبداية — أدق من رقم شهر من غير سنة.
-     ============================================================ */
-  var from = joinMonthKey(s);
-  if(from && mk < from) return null;
+  /* المستحق الشهري لشهر واحد بس — وجوه نافذة الاحتساب */
+  var from = billFrom(s, g);
+  if(!from) return null;
+  if(mk < String(from).slice(0,7)) return null;
+  var payday = Math.min(28, Math.max(1, num(g.payday,1)));
+  var dueDate = mk+"-"+String(payday).padStart(2,"0");
+  if(dueDate < from) return null;
   return { mi:mi, amount:num(g.fee), paid: !!payOfMonth(s.id, g.id, mi) };
 }
 /* تاريخ بداية اشتراك الطالب بصيغة سنة-شهر */
@@ -1645,8 +1726,11 @@ function lateDetail(s, g, mk){
 
 /* حصص الطالب في مجموعة بالحصة */
 function sesDuesOf(sid, gid){
+  var s = studentById(sid);
   return (DB.sesDue||[]).filter(function(x){
-    return x.sid===sid && (!gid || x.gid===gid);
+    if(x.sid!==sid) return false;
+    if(gid && x.gid!==gid) return false;
+    return billEligible(s, groupById(x.gid), x.date);
   }).sort(function(a,b){ return String(b.date).localeCompare(String(a.date)); });
 }
 function toggleSesDue(id){
@@ -1659,9 +1743,11 @@ function toggleSesDue(id){
 }
 /* مستحق حصص الطالب (للمجموعات اللي بالحصة) */
 function sesDueOf(sid){
+  var s = studentById(sid);
   var due=0, paid=0;
   (DB.sesDue||[]).forEach(function(x){
     if(x.sid!==sid) return;
+    if(!billEligible(s, groupById(x.gid), x.date)) return;
     due += num(x.amount);
     if(duePaid(x)) paid += num(x.amount);
   });
@@ -2250,6 +2336,8 @@ function viewGroup(gid){
     stat("كود المجموعة", '<span style="letter-spacing:.08em">'+esc(g.code||"—")+'</span>',
          "المفتاح الثابت للاستيراد", "")+
     stat("الطلاب", ar(st.length), "", "")+
+    stat("بداية الاحتساب", fmtD(groupBillFrom(g)||today()),
+         "مفيش مستحقات قبل كده", "")+
     stat("السعر", money(g.fee), (g.mode==="ses"?"للحصة":"للشهر")+
          (g.perMonth? " · "+ar(g.perMonth)+" حصص/شهر":""), "")+
     stat("محصّل "+monthName(mk).split(" ")[0], money(M.paid),
@@ -3990,6 +4078,15 @@ function modalGroup(gid){
       '<input type="number" id="g_payday" inputmode="numeric" min="1" max="28" '+
       'value="'+esc(g&&g.payday?g.payday:1)+'" placeholder="١"></label>'+
     '</div>'+
+    '<div class="grid2">'+
+    '<label class="f"><span>تاريخ بداية المجموعة</span>'+
+      '<input type="date" id="g_start" value="'+esc(g&&g.startDate? g.startDate : today())+'"></label>'+
+    '<label class="f"><span>بداية احتساب المستحقات</span>'+
+      '<input type="date" id="g_bill" value="'+
+        esc(g? (g.billFrom||g.startDate||today()) : today())+'"></label>'+
+    '</div>'+
+    '<div class="note" style="margin-bottom:12px">مفيش أي مستحق هيتحسب قبل التاريخ ده — '+
+      'حتى لو فيه حصص أو بيانات قديمة. البيانات القديمة مش بتتحذف، بس مش بتدخل الحساب.</div>'+
     '<label class="f"><span>عدد الحصص في الشهر</span>'+
       '<input type="number" id="g_per" inputmode="numeric" min="1" max="31" '+
       'value="'+esc(g&&g.perMonth?g.perMonth:8)+'" placeholder="٨">'+
@@ -4020,6 +4117,8 @@ function saveGroup(){
   g.mode = val("g_mode")||"month";           /* الطريقة الافتراضية للطلاب الجدد */
   g.payday = Math.min(28, Math.max(1, num(val("g_payday"),1)));
   g.perMonth = Math.max(1, num(val("g_per"),8));
+  g.startDate = val("g_start") || g.startDate || today();
+  g.billFrom  = val("g_bill")  || g.startDate;
   g.place = val("g_place").trim();
   if(gid) g.status = val("g_status")||"on";
   saveSync(); closeModal(); render();
@@ -4063,9 +4162,10 @@ function modalStudent(sid){
       DB.families.map(function(f2){
         return '<option value="'+f2.id+'"'+(s&&s.famId===f2.id?" selected":"")+'>'+esc(f2.name)+'</option>';
       }).join("")+'</select></label>' : '')+
-    '<label class="f"><span>تاريخ بداية الاشتراك</span>'+
+    '<label class="f"><span>تاريخ انضمام الطالب</span>'+
       '<input type="date" id="s_jd" value="'+esc(s&&s.joinDate? s.joinDate : today())+'">'+
-      '<small class="mut" style="font-size:11.5px">المستحقات بتبدأ من الشهر ده</small></label>'+
+      '<small class="mut" style="font-size:11.5px">المستحقات بتبدأ من التاريخ ده — '+
+      'أو من بداية احتساب المجموعة، أيهما أحدث.</small></label>'+
     '<label class="f hide"><span>بدأ من شهر</span><select id="s_join">'+
       schoolMonths().map(function(mi){
         var sel = s ? (num(s.joinMonth)===mi) : (mi===schoolMonths()[0]);
@@ -6091,7 +6191,7 @@ var ACTS = {
     /* لو بقى حاضر وطريقته بالحصة، نسجّل مستحق الحصة فورًا */
     var s = studentById(el.dataset.s), g = groupById(el.dataset.g);
     var now = attOf(el.dataset.g, el.dataset.d, el.dataset.s);
-    if(s && g && payModeOf(s)==="ses"){
+    if(s && g && payModeOf(s)==="ses" && billEligible(s, g, el.dataset.d)){
       var has = (DB.sesDue||[]).some(function(x){
         return x.sid===s.id && x.gid===g.id && x.date===el.dataset.d; });
       if((now==="P"||now==="L") && !has){
