@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "6.2";
+var APP_VER = "6.3";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -1648,6 +1648,49 @@ function dueBuckets(sid){
   return { today:todayD, old:old,
            todaySum: todayD.reduce(function(a,x){ return a+x.rest; },0),
            oldSum:   old.reduce(function(a,x){ return a+x.rest; },0) };
+}
+
+/* ============================================================
+   الحالة المالية للطالب في تاريخ معيّن — المصدر الوحيد
+   بتستخدمها كل الشاشات: لوحة اليوم · المجموعة · ملف الطالب ·
+   المتأخرات · التقارير. مفيش منطق تاني في أي مكان.
+
+   المشكلة اللي كانت: الصف كان بيقول «مفيش تحصيل النهاردة»
+   للطالب الشهري لأن تاريخ استحقاقه (يوم التحصيل) عدّى — رغم
+   إنه لسه **مش دافع**. دلوقتي بنفرّق بين:
+     · مستحق النهاردة  (تاريخه = النهاردة)
+     · متأخر           (تاريخه عدّى ولسه مش مدفوع)
+   ============================================================ */
+function payStatus(sid, date){
+  date = date || today();
+  var s = studentById(sid);
+  if(!s) return null;
+  if(isExemptOn(s, date))
+    return { exempt:true, mode:"free", label:"معفي",
+             dueToday:0, arrears:0, total:0, paidToday:0,
+             todayRows:[], oldRows:[], hasAny:false };
+  var rows = duesOf(sid, date);
+  var todayRows = rows.filter(function(x){ return x.date===date && x.rest>0; });
+  var oldRows   = rows.filter(function(x){ return x.date < date && x.rest>0; });
+  var dueToday  = todayRows.reduce(function(a,x){ return a+num(x.rest); }, 0);
+  var arrears   = oldRows.reduce(function(a,x){ return a+num(x.rest); }, 0);
+  /* اتدفع النهاردة؟ */
+  var paidToday = 0;
+  DB.pays.forEach(function(p){ if(p.sid===sid && p.date===date) paidToday += num(p.amount); });
+  var mode = payModeOf(s);
+  var label;
+  if(dueToday && arrears)   label = "مستحق "+money(dueToday)+" · متأخر "+money(arrears);
+  else if(dueToday)         label = "مستحق النهاردة "+money(dueToday);
+  else if(arrears)          label = "متأخر "+money(arrears);
+  else if(paidToday)        label = "اتدفع النهاردة "+money(paidToday);
+  else                      label = "سديد";
+  return {
+    exempt:false, mode:mode, label:label,
+    dueToday:dueToday, arrears:arrears, total:dueToday+arrears,
+    paidToday:paidToday,
+    todayRows:todayRows, oldRows:oldRows,
+    hasAny: (dueToday+arrears) > 0
+  };
 }
 
 /* ============================================================
@@ -3221,7 +3264,6 @@ function modalQ(eid, qid){
     '<textarea id="q_t" placeholder="اكتب السؤال… أو سيبه فاضي لو الصورة كفاية" '+
       'style="min-height:64px;margin-bottom:8px">'+esc(q?q.text:"")+'</textarea>'+
     '<div id="q_imgBox" style="margin-bottom:12px">'+ qImgHTML(q && q.img) +'</div>'+
-    '<input type="file" id="q_imgF" accept="image/*" data-act="qImgPick" style="display:none">'+
     '<div class="grid2">'+
     '<label class="f"><span>الدرجة</span>'+
       '<input type="number" id="q_m" inputmode="decimal" step="0.5" value="'+esc(q?q.mark:1)+'"></label>'+
@@ -3274,18 +3316,41 @@ function modalQ(eid, qid){
   $("#modal").dataset.qid = qid||"";
 }
 /* صورة السؤال — المعاينة وأزرارها */
+/* ============================================================
+   مكوّن رفع الصور — واحد للمدرّس والطالب
+   بيربط الزرار بالـinput مباشرة (onclick) بدل ما يعتمد على
+   المرسل العام، لأن بعض المتصفحات بتمنع فتح منتقي الملفات
+   لو النداء جه من حدث مش مباشر.
+   ============================================================ */
+function imgPickerHTML(id, label, opts){
+  opts = opts || {};
+  var multi = opts.multi ? " multiple" : "";
+  var cam   = opts.camera ? ' capture="environment"' : "";
+  return '<input type="file" id="'+id+'" accept="image/jpeg,image/png,image/webp,image/*"'+
+      multi+cam+' style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">'+
+    '<button type="button" class="btn ghost block" '+
+      'onclick="document.getElementById(\''+id+'\').click()" '+
+      'style="border-style:dashed;padding:16px">'+
+      '<div style="font-size:22px;margin-bottom:3px">🖼</div>'+esc(label)+
+      '<div class="mut" style="font-size:11.5px;font-weight:400;margin-top:2px">'+
+        'JPG · PNG · WEBP</div></button>';
+}
 function qImgHTML(img){
   if(!img)
-    return '<button class="btn ghost block" data-act="qImgBtn" style="border-style:dashed">'+
-      '🖼 رفع صورة للسؤال</button>';
+    return imgPickerHTML("q_imgF", "اضغط لرفع صورة السؤال");
   return '<div style="border:1px solid var(--line);border-radius:12px;overflow:hidden">'+
-    '<img src="'+img+'" style="width:100%;display:block;max-height:280px;object-fit:contain;'+
-      'background:var(--paper)">'+
+    '<img src="'+img+'" data-act="zoomImg" data-src="'+img+'" '+
+      'style="width:100%;display:block;max-height:280px;object-fit:contain;'+
+      'background:var(--paper);cursor:zoom-in">'+
     '<div style="display:flex;gap:6px;padding:8px;border-top:1px solid var(--line2)">'+
-      '<button class="btn ghost sm" data-act="qImgBtn" style="flex:1">تغيير</button>'+
+      '<button type="button" class="btn ghost sm" style="flex:1" '+
+        'onclick="document.getElementById(\'q_imgF\').click()">تغيير</button>'+
       '<button class="btn ghost sm" data-act="qImgDel" style="flex:1;color:var(--bad)">حذف</button>'+
       '<span class="tag" style="align-self:center">'+fmtSize(imgSize(img))+'</span>'+
-    '</div></div>';
+    '</div>'+
+    '<input type="file" id="q_imgF" accept="image/jpeg,image/png,image/webp,image/*" '+
+      'style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">'+
+    '</div>';
 }
 function optRow(i, val, checked){
   return '<div class="row" style="flex-wrap:nowrap;gap:7px;margin-bottom:7px" data-opt>'+
@@ -4747,12 +4812,16 @@ function qBodyHTML(q, A, e){
         }).join("")+'</div>';
     }
     if(imgs.length < ANS_IMG_MAX){
-      h += '<div class="row">'+
-        '<button class="btn ghost sm" data-act="ansImgBtn" style="flex:1">🖼 من الجهاز</button>'+
-        '<button class="btn ghost sm" data-act="ansCamBtn" style="flex:1">📷 صوّر الحل</button>'+
-        '</div>'+
-        '<input type="file" id="ans_f" accept="image/*" multiple data-act="ansImgPick" style="display:none">'+
-        '<input type="file" id="ans_c" accept="image/*" capture="environment" data-act="ansImgPick" style="display:none">';
+      h += '<input type="file" id="ans_f" accept="image/jpeg,image/png,image/webp,image/*" multiple '+
+          'style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">'+
+        '<input type="file" id="ans_c" accept="image/*" capture="environment" '+
+          'style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">'+
+        '<div class="row">'+
+        '<button type="button" class="btn ghost sm" style="flex:1;padding:13px" '+
+          'onclick="document.getElementById(\'ans_f\').click()">🖼 من الجهاز</button>'+
+        '<button type="button" class="btn ghost sm" style="flex:1;padding:13px" '+
+          'onclick="document.getElementById(\'ans_c\').click()">📷 صوّر الحل</button>'+
+        '</div>';
     }else{
       h += '<div class="note warn">وصلت أقصى عدد صور ('+ar(ANS_IMG_MAX)+')</div>';
     }
@@ -5031,16 +5100,15 @@ function sesModalHTML(gid, d){
     var ex = isExempt(s);
     if(ex) free++;
     /* مستحق اليوم لهذا الطالب */
-    var todayDues = ex ? [] : duesOf(s.id, d).filter(function(x){ return x.date===d; });
-    var need = todayDues.reduce(function(a,x){ return a+num(x.amount); },0);
-    var got  = todayDues.reduce(function(a,x){ return a+num(x.paidAmt||0); },0);
-    needToday += need; gotToday += got;
-    /* متأخر سابق */
-    var old = ex ? [] : duesOf(s.id, d).filter(function(x){ return x.date < d && x.rest>0; });
-    var oldSum = old.reduce(function(a,x){ return a+num(x.rest); },0);
-    oldRest += oldSum;
-    return { s:s, v:v, ex:ex, dues:todayDues, need:need, got:got,
-             rest:Math.max(0,need-got), old:oldSum };
+    /* الحالة المالية من الدالة المركزية */
+    var P0 = payStatus(s.id, d) || { exempt:true, dueToday:0, arrears:0, paidToday:0 };
+    var need = P0.dueToday + (P0.exempt?0:0);
+    var got  = P0.paidToday;
+    needToday += P0.dueToday; gotToday += P0.paidToday;
+    oldRest += P0.arrears;
+    return { s:s, v:v, ex:P0.exempt, P:P0,
+             need:P0.dueToday, got:P0.paidToday,
+             rest:P0.dueToday, old:P0.arrears };
   });
 
   /* الفلترة */
@@ -5060,14 +5128,30 @@ function sesModalHTML(gid, d){
   var h = mh((_t? _t+" — " : g.name+" — ")+fmtD(d))+'<div class="mb">';
 
   /* ملخّص */
+  /* ============================================================
+     ملخّص التحصيل — المعفيون مش داخلين في الأرقام
+     ============================================================ */
+  var payable = rows.filter(function(r){ return !r.ex; });
+  var owing   = payable.filter(function(r){ return (r.need + r.old) > 0; });
+  var settled = payable.filter(function(r){ return (r.need + r.old) === 0; });
+  var totalOwed = owing.reduce(function(a,r){ return a + r.need + r.old; }, 0);
+
   h += '<div class="stats" style="margin-bottom:10px">'+
     stat("الطلاب", ar(st.length),
          "حاضر "+ar(pres)+" · غايب "+ar(abs)+(free? " · معفي "+ar(free):""), "")+
-    stat("مستحق النهاردة", money(needToday),
-         needToday? "اتحصّل "+money(gotToday):"مفيش تحصيل", needToday?"":"")+
-    stat("المتبقي", money(Math.max(0,needToday-gotToday)), "", (needToday-gotToday)>0?"late":"money")+
-    (oldRest? stat("متأخر سابق", money(oldRest), "من أيام فاتت", "late") : "")+
+    stat("عليهم فلوس", ar(owing.length)+" من "+ar(payable.length),
+         settled.length? ar(settled.length)+" سديد":"", owing.length?"late":"money")+
+    stat("المطلوب", money(totalOwed),
+         needToday? "منها "+money(needToday)+" النهاردة":"", totalOwed?"late":"money")+
+    stat("اتحصّل النهاردة", money(gotToday), "", gotToday?"money":"")+
   '</div>';
+  if(oldRest)
+    h += '<div class="note bad" style="margin-bottom:9px">'+
+      '<b>متأخرات سابقة: '+money(oldRest)+'</b> — من أيام فاتت ولسه ما اتدفعتش</div>';
+  if(!payable.length)
+    h += '<div class="note ok" style="margin-bottom:9px">كل طلاب المجموعة معفيين من الدفع</div>';
+  else if(!totalOwed && !gotToday)
+    h += '<div class="note ok" style="margin-bottom:9px">مفيش تحصيل مستحق النهاردة — كله سديد</div>';
 
   /* أزرار الحصة */
   var stt = sesState(gid,d);
@@ -5113,13 +5197,19 @@ function sesModalHTML(gid, d){
           esc(initials(s.name))+'</button>'+
         '<span class="tx"><b>'+esc(s.name)+'</b><small>'+
           (r.ex ? '★ معفي من الدفع'
-            : (r.need ? esc(payModeName(payModeOf(s)))+' · '+money(r.need)+
-                 (r.got? ' · اتدفع '+money(r.got):'')
-               : esc(payModeName(payModeOf(s)))+' · مفيش تحصيل النهاردة'))+
-          (r.old? ' · <span style="color:var(--bad)">متأخر سابق '+money(r.old)+'</span>':'')+
+            : esc(payModeName(payModeOf(s)))+' · '+
+              (r.need
+                ? '<b style="color:var(--bad)">مستحق النهاردة '+money(r.need)+'</b>'
+                : (r.got ? '<b style="color:var(--ok)">اتدفع '+money(r.got)+'</b>'
+                         : (r.old ? '' : 'سديد')))+
+              (r.old? (r.need||r.got? ' · ':'')+
+                '<b style="color:var(--bad)">متأخر '+money(r.old)+'</b>' : '')+
+              ((r.need&&r.old)? ' · الإجمالي '+money(r.need+r.old) : ''))+
         '</small></span>'+
         (r.ex ? '<span class="tag ok">معفي</span>'
-              : (PL ? '<span class="tag '+PL.c+'">'+esc(PL.t)+'</span>' : ''))+
+              : (r.need||r.old
+                ? '<span class="tag bad">'+money(r.need+r.old)+'</span>'
+                : '<span class="tag ok">سديد</span>'))+
       '</div>'+
       /* الأزرار */
       '<div style="display:flex;gap:5px;flex-wrap:wrap;padding-inline-start:47px">'+
@@ -5135,16 +5225,13 @@ function sesModalHTML(gid, d){
           '" data-d="'+d+'" data-s="'+s.id+'" style="padding:6px 10px">'+
           esc(tk? (HW_STATES.filter(function(x){return x.id===tk})[0]||{}).n || "واجب" : "واجب")+'</button>'+
         (r.ex ? ''
-          : (r.rest > 0
+          : ((r.need + r.old) > 0
             ? '<button class="btn ok sm" data-act="payNow" data-g="'+gid+'" data-s="'+s.id+
-              '" data-d="'+d+'" style="padding:6px 10px">₤ دفع '+money(r.rest)+'</button>'
-            : (r.need
+              '" data-d="'+d+'" style="padding:6px 10px">₤ دفع '+money(r.need+r.old)+'</button>'
+            : (r.got
               ? '<button class="btn ghost sm" data-act="payNow" data-g="'+gid+'" data-s="'+s.id+
                 '" data-d="'+d+'" style="padding:6px 10px;color:var(--ok)">✓ مدفوع</button>'
               : '')))+
-        (r.old>0 && !r.ex
-          ? '<button class="btn sm" data-act="payOld" data-s="'+s.id+
-            '" style="padding:6px 10px;background:var(--bad)">متأخر '+money(r.old)+'</button>' : '')+
         '<button class="btn '+(note?"ok":"ghost")+' sm" data-act="sesNote" data-g="'+gid+
           '" data-d="'+d+'" data-s="'+s.id+'" style="padding:6px 10px" title="'+esc(note)+'">✎</button>'+
         (v==="A" && contactOf(s)
@@ -7567,8 +7654,15 @@ var ACTS = {
     if(!s || !g) return;
     if(isExempt(s)){ toast("الطالب معفي من الدفع"); return; }
     var d = el.dataset.d || today();
-    var dues = duesOf(s.id, d).filter(function(x){ return x.date===d; });
-    if(!dues.length){ toast("مفيش مستحق النهاردة"); return; }
+    /* المستحق النهاردة + المتأخرات — كلهم في نافذة واحدة */
+    var dues = duesOf(s.id, d).filter(function(x){ return x.date<=d && x.rest>0; });
+    if(!dues.length){
+      /* كله مدفوع — نعرض إلغاء آخر دفعة */
+      var paid = duesOf(s.id, d).filter(function(x){ return x.date<=d && (x.paidAmt||0)>0; });
+      if(!paid.length){ toast("مفيش مستحقات"); return; }
+      modalPay(s, g, paid, d, "دفعات "+s.name);
+      return;
+    }
     modalPay(s, g, dues, d);
   },
   payOld: function(el){
@@ -8482,7 +8576,7 @@ document.addEventListener("change", function(e){
   /* نوع السؤال بيغيّر الحقول الظاهرة */
   /* حقول الإعفاء تظهر مع اختيار «معفي» */
   /* رفع صورة السؤال */
-  if(el.dataset && el.dataset.act==="qImgPick"){
+  if(el.id==="q_imgF"){
     var f0 = el.files && el.files[0];
     if(!f0) return;
     var box0 = document.getElementById("q_imgBox");
@@ -8501,7 +8595,7 @@ document.addEventListener("change", function(e){
     return;
   }
   /* رفع صور إجابة الطالب */
-  if(el.dataset && el.dataset.act==="ansImgPick"){
+  if(el.id==="ans_f" || el.id==="ans_c"){
     var fs = el.files || [];
     if(!fs.length) return;
     var e2 = (GATE.exams||[]).filter(function(x){ return x.id===UI.takeId; })[0];
