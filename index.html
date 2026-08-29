@@ -333,7 +333,7 @@ window.addEventListener("error", function(e){
 </script>
 <!-- زرار تشخيص: بيظهر تقرير بحالة البرنامج عشان نعرف المشكلة فين -->
 <button id="dbgBtn" onclick="showDiag()" style="position:fixed;bottom:8px;inset-inline-start:8px;
-  z-index:998;background:#014A59;color:#fff;border:0;border-radius:8px;padding:6px 10px;
+  z-index:30;background:#014A59;color:#fff;border:0;border-radius:8px;padding:6px 10px;
   font-size:11px;cursor:pointer;opacity:.55;font-family:system-ui">🔎 تشخيص</button>
 <div id="diag" style="display:none;position:fixed;inset:0;z-index:1000;background:#fff;
   padding:16px;overflow:auto;font-family:monospace;font-size:12px;direction:ltr;text-align:left">
@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "6.1";
+var APP_VER = "6.2";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -2073,14 +2073,25 @@ function gateHTML(){
   if(m==="book"){
     h += '<div class="card"><div class="hd"><h3>احجز مكانك</h3></div><div class="bd">'+
       '<div class="note" style="margin-bottom:11px">املا بياناتك والمدرّس هيتواصل معاك.</div>'+
-      '<label class="f"><span>الاسم</span><input type="text" id="bk_name" placeholder="الاسم كامل"></label>'+
-      '<label class="f"><span>الصف الدراسي</span><select id="bk_grade">'+
+      '<label class="f"><span>الاسم الكامل</span>'+
+        '<input type="text" id="bk_name" placeholder="الاسم رباعي"></label>'+
+      '<label class="f"><span>الصف الدراسي</span><select id="bk_grade" data-act="bkGrade">'+
         '<option value="">— اختار الصف —</option>'+
         GRADES.map(function(g){ return '<option>'+esc(g)+'</option>'; }).join("")+
       '</select></label>'+
-      '<label class="f"><span>رقم الموبايل</span>'+
-        '<input type="tel" id="bk_phone" inputmode="tel" placeholder="01xxxxxxxxx" style="direction:ltr"></label>'+
-      '<label class="f"><span>العنوان</span><input type="text" id="bk_addr" placeholder="المنطقة / الشارع"></label>'+
+      '<label class="f"><span>رقم موبايل الطالب</span>'+
+        '<input type="tel" id="bk_phone" inputmode="tel" placeholder="01xxxxxxxxx" '+
+        'style="direction:ltr"></label>'+
+      /* المجموعة المطلوبة — من المجموعات الحقيقية المفتوحة للحجز */
+      '<label class="f"><span>المجموعة المطلوبة</span>'+
+        '<select id="bk_grp" data-act="bkGrp">'+ bkGroupOpts(GATE.bkGrade||"") +'</select>'+
+        '<small class="mut" style="font-size:11.5px" id="bk_ginfo">'+
+        'اختار الصف الأول عشان نوريك مجموعاته</small></label>'+
+      '<label class="f"><span>رقم موبايل ولي الأمر</span>'+
+        '<input type="tel" id="bk_pphone" inputmode="tel" placeholder="01xxxxxxxxx" '+
+        'style="direction:ltr"></label>'+
+      '<label class="f"><span>مكان الحجز</span>'+
+        '<input type="text" id="bk_addr" placeholder="مثال: شنشور أو مجيري أو سمادون"></label>'+
       '<label class="f"><span>ملاحظات (اختياري)</span><textarea id="bk_note" style="min-height:60px"></textarea></label>'+
       (GATE.msg? '<div class="note '+(GATE.ok?"ok":"bad")+'" style="margin-bottom:10px">'+esc(GATE.msg)+'</div>':'')+
       '<button class="btn block" data-act="gBookGo"'+(GATE.busy?" disabled":"")+'>'+
@@ -3930,39 +3941,214 @@ function viewReports(){
 /* ============================================================
    تبويب الحجز — طلبات التسجيل الجديدة
    ============================================================ */
-function viewBookings(){
-  var list = (DB.bookings||[]).slice().sort(function(a,b){ return (b.at||0)-(a.at||0); });
-  var neu = list.filter(function(b){ return b.status!=="done" && b.status!=="no"; });
-  var h = pageHd("الحجز", ar(neu.length)+" طلب جديد من "+ar(list.length),
-    '<button class="btn ghost sm" data-act="pullBookings">↻ تحديث</button>');
+/* ============================================================
+   الحجز — طلب انضمام مربوط بمجموعة حقيقية
+   الحجز مش بيعمل طالب على طول. بيفضل طلب لحد ما المدرّس
+   يوافق، وساعتها الطالب بيتعمل ويتربط بالمجموعة فعليًا.
+   ============================================================ */
+var BK_STATES = [
+  { id:"new",  n:"قيد المراجعة", c:"warn" },
+  { id:"done", n:"مقبول",        c:"ok"   },
+  { id:"no",   n:"مرفوض",        c:"bad"  }
+];
+var BK_REJECT = ["المجموعة مكتملة","بيانات غير صحيحة","اتسجّل في مجموعة تانية","أخرى"];
+function bkStateOf(b){
+  var st = b.status||"new";
+  if(st==="done"||st==="ok") st="done";
+  else if(st==="no"||st==="rej") st="no";
+  else st="new";
+  for(var i=0;i<BK_STATES.length;i++) if(BK_STATES[i].id===st) return BK_STATES[i];
+  return BK_STATES[0];
+}
+/* المجموعات المتاحة للحجز — من البيانات العامة للطالب */
+function bkGroupsFor(grade){
+  var src = (GATE.pubGroups && Object.keys(GATE.pubGroups).length)
+    ? Object.keys(GATE.pubGroups).map(function(c){
+        var g = GATE.pubGroups[c]; g.code = c; return g; })
+    : DB.groups.map(function(g){ return g; });
+  return src.filter(function(g){
+    if(g.status==="off") return false;
+    if(g.bookOff) return false;                 /* الحجز مقفول للمجموعة دي */
+    if(grade && g.grade && normAr(g.grade)!==normAr(grade)) return false;
+    return true;
+  });
+}
+function grpDesc(g){
+  var d = (g.days||[]).map(function(x){ return DAYS[x]; }).join(" و");
+  return [g.name, d, g.time, g.place].filter(Boolean).join(" · ");
+}
+function bkGroupOpts(grade){
+  var list = bkGroupsFor(grade);
+  if(!list.length)
+    return '<option value="">— مفيش مجموعات متاحة —</option>';
+  return '<option value="">— اختار المجموعة —</option>' +
+    list.map(function(g){
+      var id = g.id || g.code || "";
+      return '<option value="'+esc(id)+'">'+esc(grpDesc(g))+'</option>';
+    }).join("");
+}
+/* البحث عن طالب مشابه قبل الإنشاء */
+function findSimilar(b){
+  var ph = String(b.phone||"").replace(/\D/g,"");
+  var pp = String(b.pphone||"").replace(/\D/g,"");
+  var nm = normAr(b.name||"");
+  return DB.students.filter(function(s){
+    if(s.status==="left") return false;
+    var sp = String(s.phone||"").replace(/\D/g,"");
+    var sg = String(s.guardPhone||"").replace(/\D/g,"");
+    if(ph && (sp===ph || sg===ph)) return true;
+    if(pp && (sp===pp || sg===pp)) return true;
+    if(nm && normAr(s.name)===nm) return true;
+    return false;
+  });
+}
 
-  h += '<div class="note" style="margin-bottom:12px">'+
-    'الطلبات دي جاية من صفحة «احجز مكانك». اقبل الطلب عشان الطالب يتضاف لقاعدتك.</div>';
+function viewBookings(){
+  var all = (DB.bookings||[]).slice().sort(function(x,y){ return (y.at||0)-(x.at||0); });
+  var F = UI.bkF || "new";
+  var Q = normAr(UI.bkQ||"");
+  var byState = { new:[], done:[], no:[] };
+  all.forEach(function(b){ byState[bkStateOf(b).id].push(b); });
+  var list = (F==="all" ? all : byState[F]||[]).filter(function(b){
+    if(!Q) return true;
+    return normAr(b.name||"").indexOf(Q)>=0 ||
+           String(b.phone||"").indexOf(UI.bkQ)>=0 ||
+           String(b.pphone||"").indexOf(UI.bkQ)>=0;
+  });
+
+  var h = pageHd("الحجوزات",
+    ar(byState.new.length)+" قيد المراجعة · "+ar(byState.done.length)+" مقبول",
+    '<button class="btn ghost sm" data-act="pullBk">↻ تحديث</button>');
+
+  h += '<div class="note" style="margin-bottom:11px">طلب الحجز مش بيعمل طالب لوحده. '+
+    'راجع البيانات، عدّل اللي محتاج، وبعدين اقبل — والطالب هيتعمل ويتربط بالمجموعة تلقائيًا.</div>';
+
+  h += '<input type="text" id="bk_q" value="'+esc(UI.bkQ||"")+'" data-act="bkQ" '+
+    'placeholder="ابحث بالاسم أو الرقم…" style="margin-bottom:8px">';
+  h += '<div class="chips">'+
+    [["new","قيد المراجعة",byState.new.length],["done","مقبول",byState.done.length],
+     ["no","مرفوض",byState.no.length],["all","الكل",all.length]].map(function(x){
+      return '<button class="'+(F===x[0]?"on":"")+'" data-act="bkF" data-f="'+x[0]+'">'+
+        esc(x[1])+' <small>'+ar(x[2])+'</small></button>';
+    }).join("")+'</div>';
 
   if(!list.length)
-    return h + '<div class="card"><div class="bd"><div class="empty"><div class="big">✎</div>'+
-      '<b>مفيش طلبات لسه</b><p>شارك رابط البرنامج مع الطلاب عشان يحجزوا.</p></div></div></div>';
+    return h+'<div class="card"><div class="bd"><div class="empty"><div class="big">✉</div>'+
+      '<b>مفيش طلبات هنا</b><p>طلبات الحجز من صفحة «احجز مكانك» هتظهر هنا.</p></div></div></div>';
 
   h += '<div class="card"><div class="bd flush">';
   list.forEach(function(b){
-    var done = b.status==="done", no = b.status==="no";
-    h += '<div class="item" style="cursor:default;align-items:flex-start;opacity:'+((done||no)?".55":"1")+'">'+
-      '<span class="av'+(done?"":(no?" b":" w"))+'">'+esc(initials(b.name))+'</span>'+
-      '<span class="tx"><b style="white-space:normal">'+esc(b.name)+'</b>'+
-      '<small style="white-space:normal">'+esc(b.grade||"")+
-        (b.phone? ' · <span style="direction:ltr">'+esc(b.phone)+'</span>':'')+
-        (b.addr? ' · '+esc(b.addr):'')+
-        (b.note? '<br>«'+esc(b.note)+'»':'')+
-        '<br>'+fmtD(b.date||"")+'</small></span>'+
-      '<span style="display:flex;flex-direction:column;gap:5px;flex:0 0 auto">'+
-        (done? '<span class="tag ok">اتقبل</span>'
-         : no? '<span class="tag bad">مرفوض</span>'
-         : '<button class="btn sm" data-act="bkAccept" data-i="'+esc(b.id)+'">قبول</button>'+
-           '<button class="btn ghost sm" data-act="bkReject" data-i="'+esc(b.id)+'" style="color:var(--bad)">رفض</button>')+
-        (b.phone? '<a class="btn ghost sm" href="tel:'+esc(b.phone)+'" style="text-decoration:none;text-align:center">☎</a>':'')+
-      '</span></div>';
+    var S = bkStateOf(b);
+    var g = groupById(b.agid || b.gid);
+    h += '<button class="item" data-act="openBk" data-i="'+esc(b.id)+'">'+
+      '<span class="av'+(S.id==="new"?" w":(S.id==="done"?" g":" b"))+'">'+
+        esc(initials(b.name||"?"))+'</span>'+
+      '<span class="tx"><b>'+esc(b.name||"")+'</b><small>'+
+        esc(b.grade||"")+
+        (b.gname? ' · '+esc(String(b.gname).split(" · ")[0]) : (g? ' · '+esc(g.name):''))+
+        '<br>'+esc(b.phone||"")+(b.pphone? ' · ولي الأمر '+esc(b.pphone):'')+
+        (b.addr? ' · '+esc(b.addr):'')+'</small></span>'+
+      '<span class="tag '+S.c+'">'+esc(S.n)+'</span>'+
+      '<span class="chev">‹</span></button>';
   });
-  return h + '</div></div>';
+  return h+'</div></div>';
+}
+
+/* ============================================================
+   تفاصيل طلب الحجز — مراجعة وتعديل وقبول
+   ============================================================ */
+function modalBooking(id){
+  var b = (DB.bookings||[]).filter(function(x){ return x.id===id; })[0];
+  if(!b){ toast("الطلب مش موجود"); return; }
+  var S = bkStateOf(b);
+  var sim = S.id==="new" ? findSimilar(b) : [];
+  var gid = b.agid || b.gid || "";
+  var g = groupById(gid);
+  var glist = DB.groups.filter(function(x){ return x.status!=="off"; });
+
+  var h = mh("طلب حجز")+'<div class="mb">'+
+    '<div class="note '+(S.id==="done"?"ok":(S.id==="no"?"bad":"warn"))+
+      '" style="margin-bottom:11px"><b>'+esc(S.n)+'</b>'+
+      (b.at? ' · '+fmtD(new Date(b.at).toISOString().slice(0,10)) : '')+
+      (b.sid? '<br>اتحوّل لطالب في النظام' : '')+'</div>';
+
+  if(sim.length){
+    h += '<div class="note bad" style="margin-bottom:11px">'+
+      '<b>⚠ فيه طالب مسجّل ببيانات مشابهة</b><br>'+
+      sim.slice(0,3).map(function(s){
+        return '• '+esc(s.name)+(s.phone? ' — '+esc(s.phone):'')+
+          (s.guardPhone? ' / '+esc(s.guardPhone):'');
+      }).join("<br>")+
+      '<br><span style="font-size:12px">راجع كويس قبل ما تقبل عشان ما تعملش نسخة تانية.</span>'+
+      '</div>';
+  }
+
+  if(S.id==="new"){
+    /* نموذج قابل للتعديل */
+    h += '<label class="f"><span>الاسم الكامل</span>'+
+      '<input type="text" id="bk_e_n" value="'+esc(b.name||"")+'"></label>'+
+      '<div class="grid2">'+
+      '<label class="f"><span>الصف</span><select id="bk_e_g">'+
+        GRADES.map(function(x){
+          return '<option value="'+esc(x)+'"'+(b.grade===x?" selected":"")+'>'+esc(x)+'</option>';
+        }).join("")+'</select></label>'+
+      '<label class="f"><span>مكان الحجز</span>'+
+        '<input type="text" id="bk_e_a" value="'+esc(b.addr||"")+'"></label>'+
+      '</div>'+
+      '<div class="grid2">'+
+      '<label class="f"><span>موبايل الطالب</span>'+
+        '<input type="tel" id="bk_e_p" value="'+esc(b.phone||"")+'" style="direction:ltr"></label>'+
+      '<label class="f"><span>موبايل ولي الأمر</span>'+
+        '<input type="tel" id="bk_e_pp" value="'+esc(b.pphone||"")+'" style="direction:ltr"></label>'+
+      '</div>'+
+      '<label class="f"><span>المجموعة</span><select id="bk_e_gid">'+
+        '<option value="">— اختار المجموعة —</option>'+
+        glist.map(function(x){
+          return '<option value="'+x.id+'"'+(gid===x.id?" selected":"")+'>'+esc(grpDesc(x))+'</option>';
+        }).join("")+'</select>'+
+        (b.gname? '<small class="mut" style="font-size:11.5px">اللي طلبه الطالب: '+
+          esc(b.gname)+'</small>':'')+'</label>'+
+      '<div class="grid2">'+
+      '<label class="f"><span>نظام الدفع</span><select id="bk_e_pay">'+
+        PAY_MODES.map(function(m){
+          var def = g && g.mode==="ses" ? "ses" : "month";
+          return '<option value="'+m.id+'"'+(def===m.id?" selected":"")+'>'+esc(m.name)+'</option>';
+        }).join("")+'</select></label>'+
+      '<label class="f"><span>تاريخ الانضمام</span>'+
+        '<input type="date" id="bk_e_jd" value="'+today()+'"></label>'+
+      '</div>'+
+      '<label class="f"><span>ملاحظات</span>'+
+        '<textarea id="bk_e_nt" style="min-height:56px">'+esc(b.note||"")+'</textarea></label>';
+  }else{
+    /* عرض للقراءة */
+    h += '<div style="border:1px solid var(--line);border-radius:11px;overflow:hidden">'+
+      [["الاسم",b.name],["الصف",b.grade],["موبايل الطالب",b.phone],
+       ["موبايل ولي الأمر",b.pphone],["المجموعة", g? g.name : (b.gname||"")],
+       ["مكان الحجز",b.addr],["ملاحظات",b.note]].map(function(r){
+        if(!r[1]) return "";
+        return '<div style="display:flex;gap:9px;padding:9px 12px;border-bottom:1px solid var(--line2);'+
+          'font-size:13.5px"><span class="mut" style="flex:0 0 110px">'+esc(r[0])+'</span>'+
+          '<span style="flex:1"><b>'+esc(r[1])+'</b></span></div>';
+      }).join("")+'</div>';
+    if(b.rejWhy) h += '<div class="note bad" style="margin-top:9px"><b>سبب الرفض:</b> '+
+      esc(b.rejWhy)+'</div>';
+  }
+  h += '</div>';
+
+  /* الأزرار */
+  if(S.id==="new"){
+    h += '<div class="mf" style="flex-wrap:wrap">'+
+      '<button class="btn ghost" data-act="bkReject" data-i="'+esc(b.id)+
+        '" style="color:var(--bad);flex:0 0 auto">رفض</button>'+
+      '<button class="btn" data-act="bkApprove" data-i="'+esc(b.id)+'" style="flex:1">'+
+        '✓ قبول وإضافة للمجموعة</button></div>';
+  }else{
+    h += '<div class="mf">'+
+      (b.sid? '<button class="btn ghost" data-act="openStuFromBk" data-s="'+esc(b.sid)+
+        '">ملف الطالب</button>':'')+
+      '<button class="btn" data-act="close">إغلاق</button></div>';
+  }
+  openModal(h);
 }
 
 /* ============================================================
@@ -4662,6 +4848,10 @@ function modalGroup(gid){
     '</div>'+
     '<div class="note" style="margin-bottom:12px">مفيش أي مستحق هيتحسب قبل التاريخ ده — '+
       'حتى لو فيه حصص أو بيانات قديمة. البيانات القديمة مش بتتحذف، بس مش بتدخل الحساب.</div>'+
+    '<label style="display:flex;align-items:center;gap:9px;padding:6px 0 12px;cursor:pointer">'+
+      '<input type="checkbox" id="g_book"'+((!g||!g.bookOff)?" checked":"")+' style="width:18px;height:18px">'+
+      '<span style="font-size:14px">السماح بالحجز من الصفحة العامة'+
+      '<br><small class="mut">لو قفلتها، المجموعة مش هتظهر في «احجز مكانك»</small></span></label>'+
     '<label class="f"><span>عدد الحصص في الشهر</span>'+
       '<input type="number" id="g_per" inputmode="numeric" min="1" max="31" '+
       'value="'+esc(g&&g.perMonth?g.perMonth:8)+'" placeholder="٨">'+
@@ -4692,6 +4882,7 @@ function saveGroup(){
   g.mode = val("g_mode")||"month";           /* الطريقة الافتراضية للطلاب الجدد */
   g.payday = Math.min(28, Math.max(1, num(val("g_payday"),1)));
   g.perMonth = Math.max(1, num(val("g_per"),8));
+  g.bookOff = !(document.getElementById("g_book") && document.getElementById("g_book").checked);
   g.startDate = val("g_start") || g.startDate || today();
   g.billFrom  = val("g_bill")  || g.startDate;
   g.place = val("g_place").trim();
@@ -6201,7 +6392,17 @@ var ACTS = {
     }).catch(function(){});
   },
   gStu:   function(){ GATE.mode="stu";   GATE.msg=""; render(); },
-  gBook:  function(){ GATE.mode="book";  GATE.msg=""; GATE.ok=false; render(); },
+  gBook:  function(){
+    GATE.mode="book"; GATE.msg=""; GATE.bkGrade=""; render();
+    /* بنجيب المجموعات الحقيقية عشان الطالب يختار منها */
+    if(fbInit()){
+      FB.auth.signInAnonymously().then(function(){ return fbGet("pub/groups"); })
+        .then(function(g){ GATE.pubGroups = g||{}; render(); })
+        .catch(function(){});
+    }
+  },
+  bkGrade: function(){},
+  bkGrp:   function(){},
   gLogin: function(){ gAuth(); },
   /* ============================================================
      الدخول المحلي — من غير سحابة
@@ -6930,24 +7131,93 @@ var ACTS = {
   },
   /* ---------- الحجز ---------- */
   pullBookings: function(){ pullBookings(true); },
-  bkAccept: function(el){
+  /* ============================================================
+     الحجوزات — القبول بيعمل الطالب فعليًا ويربطه بالمجموعة
+     ============================================================ */
+  openBk:  function(el){ modalBooking(el.dataset.i); },
+  bkF:     function(el){ UI.bkF = el.dataset.f||"new"; render(); },
+  bkQ:     function(){},
+  pullBk:  function(){ pullBookings(true); },
+  openStuFromBk: function(el){
+    closeModal(); UI.sub={s:el.dataset.s}; UI.tab="studs"; render();
+  },
+  bkApprove: function(el){
     var b = (DB.bookings||[]).filter(function(x){ return x.id===el.dataset.i; })[0];
     if(!b) return;
-    var exists = DB.students.filter(function(s){ return normAr(s.name)===normAr(b.name); })[0];
-    if(!exists){
-      DB.students.push({ id:uid("s"), name:b.name, grade:b.grade||"", phone:b.phone||"",
-        guardPhone:"", note:(b.addr? "العنوان: "+b.addr : "")+(b.note? " · "+b.note:""),
-        groups:[], joinMonth:schoolMonths()[0], status:"on", at:Date.now() });
-    }
-    b.status = "done";
-    saveSync(); render();
-    toast(exists? "الطالب موجود بالفعل — الطلب اتقبل" : "اتضاف «"+b.name+"» للطلاب");
+    if(bkStateOf(b).id!=="new"){ toast("الطلب اتراجع خلاص"); return; }
+    /* البيانات النهائية بعد تعديل المدرّس */
+    var nm  = val("bk_e_n").trim();
+    var gr  = val("bk_e_g");
+    var ph  = val("bk_e_p").trim();
+    var pp  = val("bk_e_pp").trim();
+    var gid = val("bk_e_gid");
+    var ad  = val("bk_e_a").trim();
+    var nt  = val("bk_e_nt").trim();
+    var pay = val("bk_e_pay") || "month";
+    var jd  = val("bk_e_jd") || today();
+    if(nm.length<3){ toast("اكتب الاسم كامل"); return; }
+    if(!gid){ toast("اختار المجموعة"); return; }
+    var g = groupById(gid);
+    if(!g){ toast("المجموعة مش موجودة"); return; }
+    /* تحذير من التكرار */
+    var sim = findSimilar({ name:nm, phone:ph, pphone:pp });
+    if(sim.length && !confirm("فيه طالب مسجّل ببيانات مشابهة:\n"+
+      sim.slice(0,3).map(function(s){ return "· "+s.name; }).join("\n")+
+      "\n\nتكمّل وتعمل طالب جديد؟")) return;
+    if(!confirm("قبول «"+nm+"» وإضافته لمجموعة «"+g.name+"»؟\n\n"+
+      "هيتعمل طالب جديد بكل بياناته، ومستحقاته هتبدأ من "+fmtD(jd)+".")) return;
+    /* إنشاء الطالب — بنفس دوال نظام الطلاب */
+    var s = {
+      id: uid("s"), name: nm, grade: gr,
+      phone: ph, guardPhone: pp,
+      addr: ad, note: nt,
+      groups: [gid], status: "on",
+      payMode: pay,
+      joinDate: jd,
+      joinMonth: num(String(jd).slice(5,7), schoolMonths()[0]),
+      code: genStuCode(),
+      fromBooking: b.id,
+      at: Date.now()
+    };
+    DB.students.push(s);
+    /* ربط الحجز بالطالب والمجموعة المعتمدة */
+    b.status = "done"; b.sid = s.id; b.agid = gid;
+    b.doneAt = Date.now();
+    saveSync();
+    try{ pushExams(); }catch(e){}
+    closeModal(); UI.sub={s:s.id}; UI.tab="studs"; render();
+    toast("اتقبل — "+nm+" بقى في "+g.name);
   },
   bkReject: function(el){
     var b = (DB.bookings||[]).filter(function(x){ return x.id===el.dataset.i; })[0];
     if(!b) return;
-    if(!confirm("رفض طلب «"+b.name+"»؟")) return;
-    b.status = "no"; saveSync(); render(); toast("اترفض");
+    /* بنستنى إطار عشان النافذة اللي قبلها تتقفل الأول */
+    var id = b.id;
+    setTimeout(function(){ ACTS._bkRejectUI(id); }, 30);
+  },
+  _bkRejectUI: function(id){
+    var b = (DB.bookings||[]).filter(function(x){ return x.id===id; })[0];
+    if(!b) return;
+    openModal(mh("رفض الطلب")+'<div class="mb">'+
+      '<div class="note" style="margin-bottom:11px">رفض طلب <b>'+esc(b.name||"")+'</b>'+
+        '<br>الطالب مش هيتعمل ومش هيتضاف لأي مجموعة. والطلب هيفضل في السجل.</div>'+
+      '<label class="f"><span>سبب الرفض (اختياري)</span><select id="bk_rw">'+
+        '<option value="">— بدون سبب —</option>'+
+        BK_REJECT.map(function(r){ return '<option value="'+esc(r)+'">'+esc(r)+'</option>'; }).join("")+
+        '</select></label>'+
+      '</div><div class="mf">'+
+      '<button class="btn ghost" data-act="openBk" data-i="'+esc(b.id)+'">رجوع</button>'+
+      '<button class="btn bad" data-act="bkRejectGo" data-i="'+esc(b.id)+'">تأكيد الرفض</button>'+
+      '</div>');
+  },
+  bkRejectGo: function(el){
+    var b = (DB.bookings||[]).filter(function(x){ return x.id===el.dataset.i; })[0];
+    if(!b) return;
+    b.status = "no";
+    b.rejWhy = val("bk_rw") || "";
+    b.doneAt = Date.now();
+    saveSync(); closeModal(); render();
+    toast("اترفض الطلب");
   },
 
   /* ---------- التواصل ---------- */
@@ -8254,6 +8524,25 @@ document.addEventListener("change", function(e){
       toast("اتضاف "+ar(good.length)+" صورة");
     });
     el.value = "";
+    return;
+  }
+  /* تغيير الصف → تحديث قائمة المجموعات */
+  if(el.id==="bk_q"){
+    UI.bkQ = el.value; render();
+    var q2 = document.getElementById("bk_q");
+    if(q2){ q2.focus(); try{ q2.setSelectionRange(q2.value.length,q2.value.length); }catch(e){} }
+    return;
+  }
+  if(el.id==="bk_grade"){
+    GATE.bkGrade = el.value;
+    var sel0 = document.getElementById("bk_grp");
+    if(sel0) sel0.innerHTML = bkGroupOpts(el.value);
+    var inf0 = document.getElementById("bk_ginfo");
+    if(inf0){
+      var nn0 = bkGroupsFor(el.value).length;
+      inf0.textContent = nn0 ? ("فيه "+ar(nn0)+" مجموعة متاحة للصف ده")
+                             : "مفيش مجموعات متاحة للصف ده دلوقتي";
+    }
     return;
   }
   if(el.id==="ses_q"){
