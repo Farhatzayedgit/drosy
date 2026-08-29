@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "5.4";
+var APP_VER = "6.0";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -1335,7 +1335,8 @@ function payDel(p){
 }
 function payAdd(o){
   var p = { id:uid("p"), sid:o.sid, gid:o.gid, amount:num(o.amount),
-            date:o.date || today(), kind:o.kind || "month", at:Date.now() };
+            date:o.date || today(), kind:o.kind || "month", at:Date.now(),
+            by: (DB.meta.name || "المدرّس") };
   if(o.kind==="ses"){ p.dueId = o.dueId; p.dueDate = o.dueDate; }
   else p.mi = num(o.mi);
   DB.pays.push(p);
@@ -1843,11 +1844,19 @@ function sesDueOf(sid){
 }
 function sesOf(gid, d){ return DB.sessions[sesKey(gid,d)] || null; }
 function attOf(gid, d, sid){ var s = sesOf(gid,d); return s ? (s.att||{})[sid] : undefined; }
+/* بنسجّل وقت الرصد كمان — يظهر في ملف الطالب */
 function setAtt(gid, d, sid, v){
   var k = sesKey(gid,d);
   if(!DB.sessions[k]) DB.sessions[k] = { att:{}, at:Date.now() };
   if(!DB.sessions[k].att) DB.sessions[k].att = {};
-  if(v) DB.sessions[k].att[sid] = v; else delete DB.sessions[k].att[sid];
+  if(v){
+    DB.sessions[k].att[sid] = v;
+    DB.sessions[k].attAt = DB.sessions[k].attAt || {};
+    DB.sessions[k].attAt[sid] = Date.now();
+  }else{
+    delete DB.sessions[k].att[sid];
+    if(DB.sessions[k].attAt) delete DB.sessions[k].attAt[sid];
+  }
   save();
 }
 /* مواعيد المجموعة: أيام الأسبوع + الوقت */
@@ -1871,7 +1880,7 @@ function attStats(sid, gid){
 
 /* ============================================================
    بوابة الدخول
-   ٣ مسارات: المدرّس (بحساب) · الطالب (بكود المجموعة) · الحجز (مفتوح)
+   ٣ مسارات: المدرّس (بحساب) · الطالب (بكوده الشخصي) · الحجز (مفتوح)
    ============================================================ */
 var GATE = { mode:"pick", code:"", grp:null, sid:"", msg:"", busy:false };
 var GRADES = [
@@ -1894,14 +1903,12 @@ function gateHTML(){
   if(m==="pick"){
     h += '<div class="card"><div class="bd">'+
       '<button class="btn block" data-act="gStu" style="margin-bottom:9px">'+
-        '☺ دخول الطالب — بكود المجموعة</button>'+
+        '☺ دخول الطالب — بكودك الشخصي</button>'+
       '<button class="btn ghost block" data-act="gBook" style="margin-bottom:9px">'+
         '✎ احجز مكانك — تسجيل جديد</button>'+
       '<div class="sep"></div>'+
       '<button class="btn ghost block" data-act="gTeach">🔑 دخول المدرّس</button>'+
-      '<div class="sep"></div>'+
-      '<button class="btn ghost block" data-act="gLocal" style="font-size:13.5px">'+
-        '💻 ادخل من غير إنترنت (على الجهاز ده بس)</button>'+
+
       '</div></div>'+
       '<div class="note center" style="font-size:12px">'+
         '☎ للتواصل: <b style="direction:ltr">'+esc(DB.meta.phone||"")+'</b></div>';
@@ -1915,6 +1922,18 @@ function gateHTML(){
           '<b>دي أول مرة تفتح البرنامج.</b> اختار كلمة سر قوية — دي اللي هتحمي كل بياناتك، '+
           'وهي اللي هتدخل بيها من أي جهاز.</div>'
         : '')+
+      /* ============================================================
+         من غير إنترنت: نفس النموذج، والتحقق محلي بالبصمة المحفوظة
+         ============================================================ */
+      (!navigator.onLine
+        ? (hasLocalAuth()
+          ? '<div class="note warn" style="margin-bottom:10px">'+
+            '<b>مفيش إنترنت</b><br>اكتب كلمة السر وهنتحقق منها على الجهاز، '+
+            'والبرنامج هيشتغل بنفس صلاحياتك. المزامنة هتتم أول ما النت يرجع.</div>'
+          : '<div class="note bad" style="margin-bottom:10px">'+
+            '<b>مفيش إنترنت</b><br>لازم تدخل مرة واحدة والنت شغال، '+
+            'عشان نقدر نتحقق منك بعد كده من غير نت.</div>')
+        : '')+
       '<label class="f"><span>كلمة السر</span>'+
         '<input type="password" id="ga_pw" autocomplete="'+(setup?"new-password":"current-password")+'" '+
         'style="direction:ltr;text-align:center;font-size:17px;letter-spacing:.06em"></label>'+
@@ -1922,7 +1941,9 @@ function gateHTML(){
         '<input type="password" id="ga_pw2" autocomplete="new-password" '+
         'style="direction:ltr;text-align:center;font-size:17px;letter-spacing:.06em"></label>' : '')+
       (GATE.msg? '<div class="note bad" style="margin-bottom:10px">'+esc(GATE.msg)+'</div>':'')+
-      '<button class="btn block" data-act="gLogin"'+(GATE.busy?" disabled":"")+'>'+
+      '<button class="btn block" data-act="'+
+        ((!navigator.onLine && hasLocalAuth()) ? "gLocalAuth" : "gLogin")+'"'+
+        (GATE.busy || (!navigator.onLine && !hasLocalAuth()) ? " disabled":"")+'>'+
         (GATE.busy? "لحظة…" : (setup?"احفظ كلمة السر وادخل":"دخول"))+'</button>'+
       '<button class="btn ghost block" data-act="gBack" style="margin-top:8px">→ رجوع</button>'+
       '</div></div>';
@@ -2815,7 +2836,9 @@ function viewStudent(sid){
     var v2 = (DB.sessions[k].att||{})[sid];
     if(v2===undefined) continue;
     var g2 = groupById(p2[0]);
-    hist.push({ date:p2[1], g:g2, v:v2 });
+    hist.push({ date:p2[1], g:g2, v:v2,
+                at:(DB.sessions[k].attAt||{})[sid],
+                note:(DB.sessions[k].notes||{})[sid]||"" });
   }
   hist.sort(function(a,b){ return String(b.date).localeCompare(String(a.date)); });
   if(hist.length){
@@ -2828,7 +2851,9 @@ function viewStudent(sid){
       h += '<div class="item" style="cursor:default">'+
         '<span class="av '+L2[1]+'">'+L2[2]+'</span>'+
         '<span class="tx"><b>'+fmtD(x.date)+'</b><small>'+
-          esc(x.g?x.g.name:"—")+' · '+esc(DAYS[dowOf(x.date)])+'</small></span>'+
+          esc(x.g?x.g.name:"—")+' · '+esc(DAYS[dowOf(x.date)])+
+          (x.at? ' · اترصد '+new Date(x.at).toLocaleTimeString("ar-EG",{hour:"2-digit",minute:"2-digit"}) : '')+
+          (x.note? '<br>✎ '+esc(x.note) : '')+'</small></span>'+
         '<span class="tag '+(x.v==="P"?"ok":(x.v==="L"?"warn":"bad"))+'">'+L2[0]+'</span></div>';
     });
     if(hist.length>20) h += '<div class="item mut" style="cursor:default;justify-content:center">'+
@@ -3883,58 +3908,289 @@ function modalMsg(scope, gid, sid){
    بيشوف مواعيده وتعليمات المدرّس وبيانات التواصل — من غير
    أي بيانات فلوس أو بيانات طلاب تانيين.
    ============================================================ */
+/* ============================================================
+   بيانات الطالب في بوابته — كلها من نفس مصدر المدرّس
+   الطالب بيشوف بياناته هو بس. مفيش نسخة منفصلة.
+   ============================================================ */
+function myAtt(){
+  if(!GATE.sid) return { tot:0, pres:0, abs:0, late:0, rate:100, rows:[] };
+  var rows = [], pres=0, abs=0, late=0;
+  (GATE.att || []).forEach(function(x){
+    rows.push(x);
+    if(x.v==="P") pres++; else if(x.v==="L"){ pres++; late++; } else abs++;
+  });
+  rows.sort(function(a,b){ return String(b.d).localeCompare(String(a.d)); });
+  var tot = rows.length;
+  return { tot:tot, pres:pres, abs:abs, late:late,
+           rate: tot? Math.round(pres/tot*100) : 100, rows:rows };
+}
+function myExams(){
+  var out = { next:[], now:[], past:[] };
+  (GATE.exams||[]).forEach(function(e){
+    var st = examState(e);
+    var a = stuAttempt(e.id);
+    if(a && a.submittedAt){ out.past.push({ e:e, a:a }); return; }
+    if(st==="open") out.now.push({ e:e, a:a });
+    else if(st==="sched") out.next.push({ e:e, a:a });
+  });
+  out.past.sort(function(x,y){ return (y.a.submittedAt||0)-(x.a.submittedAt||0); });
+  return out;
+}
+function myDues(){
+  var t = today();
+  var rows = (GATE.dues||[]).filter(function(x){ return num(x.rest)>0; });
+  var todayD = rows.filter(function(x){ return x.date===t; });
+  var old    = rows.filter(function(x){ return x.date < t; });
+  return { today:todayD, old:old,
+           todaySum: todayD.reduce(function(a,x){ return a+num(x.rest); },0),
+           oldSum:   old.reduce(function(a,x){ return a+num(x.rest); },0) };
+}
+function myTasks(){
+  return (GATE.tasks||[]).slice().sort(function(a,b){
+    return String(b.date).localeCompare(String(a.date)); });
+}
+/* الحصة الجاية من مواعيد المجموعة */
+function myNextSession(){
+  var g = GATE.grp;
+  if(!g || !(g.days||[]).length) return null;
+  var now = new Date();
+  for(var i=0;i<14;i++){
+    var d = new Date(now); d.setDate(d.getDate()+i);
+    if((g.days||[]).indexOf(d.getDay())<0) continue;
+    if(i===0 && g.time){
+      var hm = String(g.time).split(":");
+      if(now.getHours()*60+now.getMinutes() > num(hm[0])*60+num(hm[1])) continue;
+    }
+    return { date: iso(d), day: DAYS[d.getDay()], time: g.time||"", place: g.place||"" };
+  }
+  return null;
+}
+/* تنبيهات الطالب */
+function myAlerts(){
+  var out = [];
+  var D = myDues(), E = myExams(), A = myAtt();
+  if(!GATE.exempt){
+    if(D.todaySum) out.push({ i:"₤", t:"عليك مستحق النهاردة "+money(D.todaySum), c:"bad" });
+    if(D.oldSum)   out.push({ i:"₤", t:"متأخرات سابقة "+money(D.oldSum), c:"bad" });
+  }
+  E.now.forEach(function(x){
+    if(!x.a) out.push({ i:"◔", t:"امتحان متاح دلوقتي: "+x.e.title, c:"warn" });
+  });
+  E.past.slice(0,2).forEach(function(x){
+    var a = gradeAttempt(x.a);
+    if(canSeeResult(x.e, a))
+      out.push({ i:"★", t:"نتيجة "+x.e.title+": "+ar(a.total)+" من "+ar(examTotalMark(x.e)), c:"ok" });
+  });
+  var lastAbs = A.rows.filter(function(x){ return x.v==="A"; })[0];
+  if(lastAbs) out.push({ i:"✕", t:"اتسجّل عليك غياب يوم "+fmtD(lastAbs.d), c:"warn" });
+  myTasks().slice(0,2).forEach(function(t){
+    if(t.state!=="done") out.push({ i:"✎", t:"عندك واجب: "+t.title, c:"warn" });
+  });
+  return out.slice(0,6);
+}
+
 function viewStudentPortal(){
-  var g = GATE.grp; if(!g) return gateHTML();
+  var g = GATE.grp || {};
   var T = GATE.teacher || {};
+  var A = myAtt(), E = myExams(), D = myDues(), TK = myTasks();
+  var NX = myNextSession(), AL = myAlerts();
 
-  var h = '<div style="display:flex;align-items:center;gap:9px;margin-bottom:12px;flex-wrap:wrap">'+
-    '<div style="flex:1;min-width:160px"><h2 style="font-size:20px">'+esc(GATE.myName||"أهلًا بيك")+'</h2>'+
-    '<div class="mut" style="font-size:12.5px">'+esc(g.name||"مجموعتي")+
-    (g.grade? ' · '+esc(g.grade):'')+'</div></div>'+
-    '<button class="btn ghost sm" data-act="gOut">خروج</button></div>';
+  /* ---------- الترويسة ---------- */
+  var h = '<div class="card" style="margin-bottom:12px;background:var(--ink);color:#fff;border:0">'+
+    '<div class="bd" style="display:flex;align-items:center;gap:12px">'+
+      '<div style="width:52px;height:52px;border-radius:16px;background:var(--seal);'+
+        'display:grid;place-items:center;font-family:Cairo;font-weight:900;font-size:22px;flex:0 0 52px">π</div>'+
+      '<div style="flex:1;min-width:0">'+
+        '<div style="font-family:Cairo,sans-serif;font-weight:800;font-size:19px">'+
+          esc(GATE.myName||"أهلًا بيك")+'</div>'+
+        '<div style="font-size:12.5px;color:#A9C0BE">'+
+          esc(g.name||"")+(g.grade? ' · '+esc(g.grade):'')+
+          '<br>'+esc(T.name||"")+(T.subject? ' — '+esc(T.subject):'')+'</div>'+
+      '</div>'+
+      '<button class="btn ghost sm" data-act="gOut" style="flex:0 0 auto">خروج</button>'+
+    '</div></div>';
 
-  /* المواعيد */
-  var days = (g.days||[]).map(function(d){ return DAYS[d]; });
-  h += '<div class="card"><div class="hd"><h3>مواعيد حصصي</h3></div><div class="bd">'+
-    (days.length
-      ? '<div class="row" style="margin-bottom:10px">'+days.map(function(d){
-          var isToday = DAYS[dowOf(today())]===d;
-          return '<span class="tag '+(isToday?"ok":"")+'" style="font-size:13px;padding:7px 13px">'+
-            esc(d)+(isToday?" — النهاردة":"")+'</span>'; }).join("")+'</div>'
-      : '<div class="mut">المواعيد لسه ماتحددتش.</div>')+
-    '<div class="grid2">'+
-      (g.time? '<div><div class="mut" style="font-size:12px">الساعة</div>'+
-        '<div class="dsp" style="font-size:20px;direction:ltr">'+esc(g.time)+'</div></div>':'')+
-      (g.place? '<div><div class="mut" style="font-size:12px">المكان</div>'+
-        '<div class="dsp" style="font-size:16px">'+esc(g.place)+'</div></div>':'')+
-    '</div></div></div>';
+  /* ---------- التنبيهات ---------- */
+  if(AL.length){
+    h += '<div class="card"><div class="hd"><h3>تنبيهات</h3>'+
+      '<span class="tag">'+ar(AL.length)+'</span></div><div class="bd flush">';
+    AL.forEach(function(x){
+      h += '<div class="item" style="cursor:default">'+
+        '<span class="av'+(x.c==="bad"?" b":(x.c==="ok"?" g":" w"))+'">'+x.i+'</span>'+
+        '<span class="tx"><b style="white-space:normal;font-size:13.5px">'+esc(x.t)+'</b></span></div>';
+    });
+    h += '</div></div>';
+  }
 
-  /* الحصة الجاية */
-  var nx = nextSession(g);
-  if(nx) h += '<div class="note ok" style="margin-bottom:12px">'+
-    '<b>الحصة الجاية:</b> '+esc(nx.label)+(g.time? ' الساعة '+esc(g.time):'')+'</div>';
+  /* ---------- الحصة القادمة ---------- */
+  h += '<div class="card"><div class="hd"><h3>الحصة القادمة</h3></div><div class="bd">';
+  if(NX){
+    h += '<div class="note ok" style="text-align:center;padding:16px">'+
+      '<div style="font-family:Cairo,sans-serif;font-weight:900;font-size:20px">'+
+        esc(NX.day)+'</div>'+
+      '<div style="font-size:14px;margin-top:3px">'+fmtD(NX.date)+'</div>'+
+      (NX.time? '<div style="font-family:Cairo,sans-serif;font-weight:900;font-size:26px;'+
+        'margin-top:7px;direction:ltr">'+esc(NX.time)+'</div>':'')+
+      (NX.place? '<div style="font-size:13px;margin-top:5px">📍 '+esc(NX.place)+'</div>':'')+
+      '<div style="font-size:12.5px;color:var(--mut);margin-top:6px">'+esc(g.name||"")+'</div>'+
+      '</div>';
+  }else h += '<div class="empty" style="padding:18px"><b>مفيش حصة قادمة</b></div>';
+  h += '</div></div>';
 
-  /* تعليمات المدرّس */
-  var msgs = (GATE.notices||[]).slice().sort(function(a,b){ return (b.at||0)-(a.at||0); });
-  h += '<div class="card"><div class="hd"><h3>تعليمات المدرّس</h3>'+
-    (msgs.length? '<span class="tag">'+ar(msgs.length)+'</span>':'')+'</div><div class="bd flush">';
-  if(!msgs.length) h += '<div class="empty"><div class="big">📋</div><b>مفيش تعليمات لسه</b>'+
-    '<p>أي حاجة المدرّس يبعتها هتظهر هنا.</p></div>';
-  msgs.forEach(function(m){
-    h += '<div class="item" style="cursor:default;align-items:flex-start">'+
-      '<span class="av'+(m.to==="me"?"":" w")+'">'+(m.to==="me"?"★":"◈")+'</span>'+
-      '<span class="tx"><b style="white-space:normal">'+esc(m.text)+'</b>'+
-      '<small>'+(m.to==="me"?"ليك انت · ":(m.to==="all"?"لكل المجموعات · ":"لمجموعتك · "))+
-      fmtD(m.date||"")+'</small></span></div>';
+  /* ---------- الواجبات ---------- */
+  h += '<div class="card"><div class="hd"><h3>الواجبات</h3>'+
+    (TK.length? '<span class="tag">'+ar(TK.length)+'</span>':'')+'</div><div class="bd flush">';
+  if(!TK.length) h += '<div class="empty" style="padding:18px"><b>مفيش واجبات</b></div>';
+  TK.slice(0,6).forEach(function(t){
+    var S = HW_STATES.filter(function(x){ return x.id===t.state; })[0];
+    h += '<div class="item" style="cursor:default">'+
+      '<span class="av'+(t.state==="done"?" g":(t.state?" w":""))+'">✎</span>'+
+      '<span class="tx"><b style="white-space:normal">'+esc(t.title)+'</b><small>'+
+        fmtD(t.date)+(t.kind? ' · '+esc(t.kind):'')+'</small></span>'+
+      '<span class="tag '+(S? S.c : "")+'">'+esc(S? S.n : "مطلوب")+'</span></div>';
   });
   h += '</div></div>';
 
-  /* بيانات المدرّس */
+  /* ---------- الامتحانات ---------- */
+  h += '<div class="card"><div class="hd"><h3>الامتحانات</h3></div><div class="bd flush">';
+  if(!E.now.length && !E.next.length && !E.past.length)
+    h += '<div class="empty" style="padding:18px"><b>مفيش امتحانات</b></div>';
+  if(E.now.length){
+    h += '<div class="grp" style="padding:10px 14px 4px;font-size:11px;font-weight:800;'+
+      'color:var(--ok);letter-spacing:.1em">متاح دلوقتي</div>';
+    E.now.forEach(function(x){
+      h += '<div class="item" style="cursor:default;flex-wrap:wrap;gap:8px">'+
+        '<span class="av g">◔</span><span class="tx"><b>'+esc(x.e.title)+'</b><small>'+
+          ar((x.e.qs||[]).length)+' سؤال · '+ar(examTotalMark(x.e))+' درجة'+
+          (x.e.mins? ' · '+ar(x.e.mins)+' دقيقة':'')+'</small></span>'+
+        '<button class="btn sm" data-act="stuStart" data-e="'+x.e.id+'">▶ ابدأ</button></div>';
+    });
+  }
+  if(E.next.length){
+    h += '<div class="grp" style="padding:10px 14px 4px;font-size:11px;font-weight:800;'+
+      'color:var(--warn);letter-spacing:.1em">قادمة</div>';
+    E.next.forEach(function(x){
+      h += '<div class="item" style="cursor:default">'+
+        '<span class="av w">◔</span><span class="tx"><b>'+esc(x.e.title)+'</b><small>'+
+          (x.e.from? 'يبدأ '+fmtD(x.e.from.slice(0,10))+' '+esc(x.e.from.slice(11,16)):'')+
+          '</small></span><span class="tag warn">مجدول</span></div>';
+    });
+  }
+  if(E.past.length){
+    h += '<div class="grp" style="padding:10px 14px 4px;font-size:11px;font-weight:800;'+
+      'color:var(--mut);letter-spacing:.1em">امتحانات سابقة</div>';
+    E.past.forEach(function(x){
+      var a = gradeAttempt(x.a), tot = examTotalMark(x.e);
+      var see = canSeeResult(x.e, a);
+      var pct = tot? Math.round(a.total/tot*100) : 0;
+      h += '<div class="item" style="cursor:default">'+
+        '<span class="av'+(see? (pct>=50?" g":" b") : " w")+'">'+
+          (see? ar(a.total) : "✓")+'</span>'+
+        '<span class="tx"><b>'+esc(x.e.title)+'</b><small>'+
+          fmtD(new Date(a.submittedAt).toISOString().slice(0,10))+
+          (see? ' · '+ar(a.total)+' من '+ar(tot)+' ('+ar(pct)+'٪)' : '')+
+          '</small></span>'+
+        (see
+          ? '<span class="tag '+(a.pending?"warn":(pct>=50?"ok":"bad"))+'">'+
+            (a.pending? "في انتظار التصحيح" : (pct>=50?"ناجح":"راسب"))+'</span>'
+          : '<span class="tag">'+(x.e.showMode==="never"? "النتيجة مخفية" : "في انتظار التصحيح")+'</span>')+
+        '</div>';
+    });
+    /* ملخّص النتائج */
+    var graded = E.past.filter(function(x){ return canSeeResult(x.e, gradeAttempt(x.a)); });
+    if(graded.length){
+      var sum = 0, mx = 0;
+      graded.forEach(function(x){
+        var a = gradeAttempt(x.a); sum += a.total; mx += examTotalMark(x.e); });
+      h += '<div class="item" style="cursor:default;background:var(--paper)">'+
+        '<span class="av">★</span><span class="tx"><b>المتوسط العام</b><small>'+
+        ar(graded.length)+' امتحان اتصحّح</small></span>'+
+        '<span class="tag ok">'+ar(mx? Math.round(sum/mx*100):0)+'٪</span></div>';
+    }
+  }
+  h += '</div></div>';
+
+  /* ---------- الحضور ---------- */
+  h += '<div class="card"><div class="hd"><h3>الحضور</h3>'+
+    (A.tot? '<span class="tag '+(A.rate>=80?"ok":(A.rate>=60?"warn":"bad"))+'">'+
+      ar(A.rate)+'٪</span>':'')+'</div><div class="bd">';
+  if(!A.tot) h += '<div class="empty" style="padding:18px"><b>مفيش حصص مرصودة</b></div>';
+  else{
+    h += '<div class="stats" style="margin-bottom:0">'+
+      stat("الحصص", ar(A.tot),"","")+
+      stat("حضرت", ar(A.pres), A.late? ar(A.late)+" متأخر":"", "money")+
+      stat("غبت", ar(A.abs),"", A.abs?"late":"")+
+    '</div>';
+    if(A.rows.length){
+      h += '<div class="sep"></div><div style="border:1px solid var(--line);border-radius:11px;overflow:hidden">'+
+        A.rows.slice(0,8).map(function(x){
+          var L2 = x.v==="P"? ["حاضر","g","✓"] : (x.v==="L"? ["متأخر","w","⏱"] : ["غايب","b","✕"]);
+          return '<div class="item" style="cursor:default;padding:9px 12px">'+
+            '<span class="av '+L2[1]+'">'+L2[2]+'</span>'+
+            '<span class="tx"><b style="font-size:13.5px">'+fmtD(x.d)+'</b><small>'+
+              esc(DAYS[dowOf(x.d)])+'</small></span>'+
+            '<span class="tag '+(x.v==="P"?"ok":(x.v==="L"?"warn":"bad"))+'">'+L2[0]+'</span></div>';
+        }).join("")+'</div>';
+    }
+  }
+  h += '</div></div>';
+
+  /* ---------- المستحقات ---------- */
+  h += '<div class="card"><div class="hd"><h3>المستحقات</h3>'+
+    (GATE.exempt? '<span class="tag ok">معفي</span>':'')+'</div><div class="bd">';
+  if(GATE.exempt){
+    h += '<div class="note ok" style="text-align:center;padding:16px">'+
+      '<div style="font-size:30px">★</div>'+
+      '<b style="font-size:16px">معفي من الدفع</b></div>';
+  }else if(!D.today.length && !D.old.length){
+    h += '<div class="note ok" style="text-align:center;padding:14px">'+
+      '<div style="font-size:26px">✓</div><b>مفيش مستحقات</b></div>';
+  }else{
+    h += '<div class="stats" style="margin-bottom:10px">'+
+      stat("مستحق النهاردة", money(D.todaySum),"", D.todaySum?"late":"")+
+      stat("متأخر سابق", money(D.oldSum),"", D.oldSum?"late":"")+
+      stat("الإجمالي", money(D.todaySum+D.oldSum),"","")+
+    '</div>'+
+      '<div style="border:1px solid var(--line);border-radius:11px;overflow:hidden">'+
+      D.today.concat(D.old).slice(0,10).map(function(x){
+        return '<div class="item" style="cursor:default;padding:9px 12px">'+
+          '<span class="av b">₤</span>'+
+          '<span class="tx"><b style="font-size:13.5px">'+esc(x.what)+'</b><small>'+
+            fmtD(x.date)+' · '+(x.kind==="ses"?"حصة":"شهري")+
+            (num(x.paidAmt)? ' · اتدفع '+money(x.paidAmt):'')+'</small></span>'+
+          '<span class="tag bad">'+money(x.rest)+'</span></div>';
+      }).join("")+'</div>';
+  }
+  h += '</div></div>';
+
+  /* ---------- تعليمات المدرّس ---------- */
+  var msgs = (GATE.notices||[]).slice()
+    .filter(function(m){ return !m.sid || m.sid===GATE.sid; })
+    .sort(function(a,b){ return (b.at||0)-(a.at||0); });
+  h += '<div class="card"><div class="hd"><h3>تعليمات المدرّس</h3>'+
+    (msgs.length? '<span class="tag">'+ar(msgs.length)+'</span>':'')+'</div><div class="bd flush">';
+  if(!msgs.length) h += '<div class="empty" style="padding:18px"><div class="big">📋</div>'+
+    '<b>مفيش تعليمات لسه</b></div>';
+  msgs.slice(0,6).forEach(function(m){
+    h += '<div class="item" style="cursor:default;align-items:flex-start">'+
+      '<span class="av">◈</span><span class="tx">'+
+      '<b style="white-space:normal">'+esc(m.text||"")+'</b>'+
+      '<small>'+(m.at? fmtD(new Date(m.at).toISOString().slice(0,10)):'')+
+      (m.sid? ' · ليك انت':'')+'</small></span></div>';
+  });
+  h += '</div></div>';
+
+  /* ---------- التواصل ---------- */
   h += '<div class="card"><div class="hd"><h3>التواصل</h3></div><div class="bd">'+
-    '<div style="font-family:Cairo,sans-serif;font-weight:800;font-size:16px">'+esc(T.name||DB.meta.name)+'</div>'+
-    '<div class="mut" style="font-size:13px;margin-bottom:9px">'+esc(T.about||T.subject||"")+'</div>'+
-    (T.phone? '<a class="btn block" href="tel:'+esc(T.phone)+'" style="text-decoration:none;display:block;text-align:center">'+
-      '☎ اتصل بالمدرّس — '+esc(T.phone)+'</a>':'')+
+    '<div style="margin-bottom:9px"><b style="font-family:Cairo,sans-serif;font-size:15px">'+
+      esc(T.name||"")+'</b>'+
+      (T.about? '<br><span class="mut" style="font-size:12.5px">'+esc(T.about)+'</span>':'')+'</div>'+
+    (T.phone
+      ? '<a class="btn block" href="tel:'+esc(T.phone)+'" style="text-decoration:none">'+
+        '☎ اتصل بالمدرّس — '+esc(T.phone)+'</a>'+
+        '<a class="btn ghost block" href="'+esc(waLink(T.phone,"السلام عليكم"))+
+        '" target="_blank" style="text-decoration:none;margin-top:8px">✆ واتساب</a>'
+      : '<div class="note">مفيش رقم تواصل</div>')+
     '</div></div>';
   return h;
 }
@@ -5706,16 +5962,25 @@ var ACTS = {
      مفيد لو النت واقع أو الفايربيز مش مظبوط. تقدر تربط السحابة
      بعدين من زرار ☁ والبيانات هتترفع.
      ============================================================ */
-  gLocal: function(){
-    if(!confirm("هتدخل من غير سحابة.\n\n"+
-      "البرنامج هيشتغل كامل والبيانات هتتحفظ على الجهاز ده بس — "+
-      "مش هتتزامن مع أجهزة تانية.\n\n"+
-      "تقدر تربط السحابة بعدين من زرار ☁.")) return;
-    FB.role = "teacher";
-    try{ localStorage.setItem(KEY+"_sess", JSON.stringify({ r:"local" })); }catch(e){}
-    UI.tab = "home"; UI.sub = null;
-    render();
-    toast("أهلًا "+(DB.meta.name||"")+" — الوضع المحلي");
+  /* ============================================================
+     الدخول المحلي — بكلمة السر، مش مفتوح
+     ============================================================ */
+  gLocalAuth: function(){
+    var pw = val("ga_pw");
+    if(!pw){ GATE.msg = "اكتب كلمة السر"; render(); return; }
+    GATE.busy = true; GATE.msg = ""; render();
+    verifyLocalAuth(pw).then(function(ok2){
+      GATE.busy = false;
+      if(!ok2){
+        GATE.msg = "كلمة السر غلط";
+        render(); return;
+      }
+      FB.role = "teacher";
+      startLocalSession();
+      UI.tab = "home"; UI.sub = null;
+      render();
+      toast("أهلًا "+(DB.meta.name||"")+" — وضع بدون إنترنت");
+    });
   },
   chPw:   function(){ modalChPw(); },
   chPwGo: function(){
@@ -5739,7 +6004,7 @@ var ACTS = {
     GATE.sid = el.dataset.s||"";
     try{ var q=JSON.parse(localStorage.getItem(KEY+"_sess")||"{}"); q.s=GATE.sid;
          localStorage.setItem(KEY+"_sess", JSON.stringify(q)); }catch(e){}
-    Promise.all([gLoadNotices(), gLoadExams()]).then(render);
+    Promise.all([gLoadNotices(), gLoadExams(), gLoadMine()]).then(render);
   },
   gOut:   function(){
     var who = (FB.role==="student")
@@ -5820,7 +6085,7 @@ var ACTS = {
     if(!e.from){ toast("حدّد وقت البداية"); return; }
     e.status="open"; e.max=examTotalMark(e);
     saveSync(); pushExams(); render();
-    toast("اتنشر — الطلاب هيشوفوه بكود المجموعة");
+    toast("اتنشر — الطلاب هيشوفوه لما يدخلوا بأكوادهم");
   },
   exDraft: function(el){
     var e=examById(el.dataset.e); if(!e) return;
@@ -7210,6 +7475,85 @@ function gErr(e){
     return "السحابة مش بترد. اتأكد إن النت شغال، أو ادخل من غير إنترنت من الشاشة الأولى.";
   return "حصلت مشكلة: " + m;
 }
+/* ============================================================
+   المصادقة المحلية — للعمل من غير إنترنت
+   المشكلة اللي كانت: زرار «ادخل من غير إنترنت» كان بيفتح البرنامج
+   لأي حد بضغطة — أي شخص يمسك الجهاز يدخل على كل البيانات.
+
+   دلوقتي: أول ما المدرّس يدخل بنجاح والنت شغال، بنحفظ **بصمة**
+   كلمة السر (hash + salt) — مش كلمة السر نفسها. ولو النت وقع،
+   نفس شاشة الدخول بتشتغل وبتتحقق من البصمة دي محليًا.
+   ============================================================ */
+var LOCAL_KEY = "_lauth";
+
+function toHex(buf){
+  return Array.prototype.map.call(new Uint8Array(buf), function(b){
+    return ("0"+b.toString(16)).slice(-2); }).join("");
+}
+function randSalt(){
+  var a = new Uint8Array(16);
+  (window.crypto || window.msCrypto).getRandomValues(a);
+  return toHex(a.buffer);
+}
+/* PBKDF2 — بطيء عمدًا عشان يصعّب التخمين */
+function hashPw(pw, salt){
+  if(!window.crypto || !window.crypto.subtle)
+    return Promise.reject(new Error("المتصفح مايدعمش التشفير"));
+  var enc = new TextEncoder();
+  return crypto.subtle.importKey("raw", enc.encode(pw), "PBKDF2", false, ["deriveBits"])
+    .then(function(key){
+      return crypto.subtle.deriveBits({
+        name:"PBKDF2", salt:enc.encode(salt),
+        iterations:150000, hash:"SHA-256"
+      }, key, 256);
+    }).then(toHex);
+}
+/* بنحفظ البصمة بعد كل دخول ناجح */
+function saveLocalAuth(pw){
+  var salt = randSalt();
+  return hashPw(pw, salt).then(function(h){
+    try{
+      localStorage.setItem(KEY+LOCAL_KEY, JSON.stringify({
+        salt: salt, hash: h, at: Date.now(), v: 1
+      }));
+    }catch(e){}
+    return true;
+  }).catch(function(){ return false; });
+}
+function hasLocalAuth(){
+  try{ return !!JSON.parse(localStorage.getItem(KEY+LOCAL_KEY)||"null"); }
+  catch(e){ return false; }
+}
+function verifyLocalAuth(pw){
+  var rec = null;
+  try{ rec = JSON.parse(localStorage.getItem(KEY+LOCAL_KEY)||"null"); }catch(e){}
+  if(!rec || !rec.salt || !rec.hash) return Promise.resolve(false);
+  return hashPw(pw, rec.salt).then(function(h){
+    /* مقارنة ثابتة الوقت */
+    if(h.length !== rec.hash.length) return false;
+    var diff = 0;
+    for(var i=0;i<h.length;i++) diff |= h.charCodeAt(i) ^ rec.hash.charCodeAt(i);
+    return diff === 0;
+  }).catch(function(){ return false; });
+}
+/* جلسة محلية بمدة — مش مفتوحة للأبد */
+var LOCAL_SESSION_HOURS = 12;
+function startLocalSession(){
+  try{
+    localStorage.setItem(KEY+"_sess", JSON.stringify({
+      r:"local", at:Date.now(), exp: Date.now() + LOCAL_SESSION_HOURS*3600000
+    }));
+  }catch(e){}
+}
+function localSessionValid(){
+  try{
+    var q = JSON.parse(localStorage.getItem(KEY+"_sess")||"null");
+    if(!q || q.r!=="local") return false;
+    if(!q.exp) return false;
+    return Date.now() < q.exp;
+  }catch(e){ return false; }
+}
+
 function gAuth(){
   if(!fbInit()){ GATE.msg="مش قادر أوصل للسحابة — اتأكد من النت"; render(); return; }
   var pw = val("ga_pw");
@@ -7320,10 +7664,32 @@ function gStudentIn(){
       try{ localStorage.setItem(KEY+"_sess",
         JSON.stringify({ r:"student", my:code, c:me.g, s:me.sid, n:me.n })); }catch(e){}
       render();
-      return Promise.all([gLoadNotices(), gLoadExams()]).then(function(){ render(); });
+      return Promise.all([gLoadNotices(), gLoadExams(), gLoadMine()]).then(function(){ render(); });
     });
   }).catch(function(e){
     GATE.busy=false; GATE.msg=gErr(e); render();
+  });
+}
+/* تحميل امتحانات المجموعة للطالب */
+function gLoadExams(){
+  if(!fbOn() || !GATE.code){ GATE.exams = []; return Promise.resolve(); }
+  return fbGet("pub/exams/"+GATE.code).then(function(all){
+    all = all || {};
+    GATE.exams = Object.keys(all).map(function(k){ return all[k]; })
+      .filter(function(e){ return e && e.id; });
+  }).catch(function(){ GATE.exams = []; });
+}
+/* تحميل بيانات الطالب الشخصية — نفس بيانات المدرّس */
+function gLoadMine(){
+  if(!fbOn() || !GATE.myCode) return Promise.resolve();
+  return fbGet("pub/mine/"+GATE.myCode).then(function(v){
+    v = v || {};
+    GATE.att    = v.att   || [];
+    GATE.tasks  = v.tasks || [];
+    GATE.dues   = v.dues  || [];
+    GATE.exempt = !!v.exempt;
+  }).catch(function(){
+    GATE.att = []; GATE.tasks = []; GATE.dues = []; GATE.exempt = false;
   });
 }
 function gLoadNotices(){
@@ -7651,7 +8017,7 @@ setInterval(function(){
   var v = document.getElementById("view");
   if(!v) return;
   /* البوابة ظاهرة؟ (أزرارها موجودة) */
-  if(v.querySelector('[data-act="gTeach"]') || v.querySelector('[data-act="gLocal"]')){
+  if(v.querySelector('[data-act="gTeach"]') || v.querySelector('[data-act="gStu"]')){
     render();
   }
 }, 1500);
