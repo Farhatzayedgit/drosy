@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "6.4";
+var APP_VER = "6.5";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -681,9 +681,63 @@ function syncDown(){
     ensureCodes(); save(); return true;
   }).catch(function(){ return false; });
 }
+/* ============================================================
+   طابور المزامنة — العمل من غير إنترنت
+   كل تعديل بيتحفظ محليًا **فورًا** (وده الأساس)، وبيتسجّل في
+   طابور. لما النت يرجع، الطابور بيتفضّى بترفع نسخة كاملة.
+   المفتاح الفريد بيمنع التكرار: عملية واحدة = سجل واحد.
+   ============================================================ */
+function queueOp(type, data){
+  try{
+    var q = JSON.parse(localStorage.getItem(KEY+"_q")||"[]");
+    var opId = type+"|"+(data.gid||"")+"|"+(data.date||"")+"|"+(data.sid||"");
+    /* نفس العملية على نفس الطالب في نفس اليوم = تحديث مش سجل جديد */
+    var i = q.findIndex(function(x){ return x.opId===opId; });
+    var op = { opId:opId, type:type, data:data, at:Date.now(), state:"pending" };
+    if(i>=0) q[i] = op; else q.push(op);
+    if(q.length > 500) q = q.slice(-500);
+    localStorage.setItem(KEY+"_q", JSON.stringify(q));
+  }catch(e){}
+}
+function queueCount(){
+  try{ return JSON.parse(localStorage.getItem(KEY+"_q")||"[]")
+    .filter(function(x){ return x.state!=="synced"; }).length; }
+  catch(e){ return 0; }
+}
+function queueClear(){
+  try{ localStorage.setItem(KEY+"_q","[]"); }catch(e){}
+}
+/* تفضية الطابور — بترفع نسخة كاملة مرة واحدة */
+function flushQueue(loud){
+  if(!fbOn() || FB.role!=="teacher"){ if(loud) toast("مفيش اتصال"); return; }
+  var n2 = queueCount();
+  if(!n2){ if(loud) toast("مفيش حاجة مستنية"); return; }
+  if(loud) toast("بنزامن "+ar(n2)+" عملية…");
+  syncUp().then(function(){
+    queueClear();
+    UI.qErr = false;
+    render();
+    toast("اتزامن "+ar(n2)+" عملية ✓");
+  }).catch(function(){
+    UI.qErr = true;
+    render();
+    if(loud) toast("المزامنة فشلت — العمليات محفوظة وهنعيد المحاولة");
+  });
+}
+/* أول ما النت يرجع، نزامن تلقائيًا */
+window.addEventListener("online", function(){
+  setTimeout(function(){ if(queueCount()) flushQueue(false); }, 1500);
+});
+
 /* بيتنادى بعد أي تعديل — بيحفظ محليًا ويرفع للسحابة */
-function saveSync(){
-  save();
+function saveSync(op){
+  save();                                   /* المحلي الأول — مش بيفشل أبدًا */
+  if(op) queueOp(op.type, op.data||{});
+  if(!navigator.onLine || !fbOn()){
+    /* مفيش نت: العملية محفوظة محليًا ومستنية في الطابور */
+    if(op) UI.qPending = true;
+    return;
+  }
   if(fbOn() && FB.role==="teacher"){
     clearTimeout(window._sy);
     window._sy = setTimeout(function(){
@@ -1244,6 +1298,7 @@ function dayTaskOf(gid, d, sid){
   return o && o.hw ? o.hw[sid] : "";
 }
 function setDayTask(gid, d, sid, v){
+  setTimeout(function(){ queueOp("hw", { gid:gid, date:d, sid:sid, v:v }); }, 0);
   var k = sesKey(gid,d);
   if(!DB.sessions[k]) DB.sessions[k] = { att:{}, at:Date.now() };
   if(!DB.sessions[k].hw) DB.sessions[k].hw = {};
@@ -1251,6 +1306,44 @@ function setDayTask(gid, d, sid, v){
   saveSync();
 }
 /* التزام الطالب بواجبات الحصص */
+/* ============================================================
+   كل واجبات الطالب — مصدر واحد
+   المشكلة اللي كانت: واجب الحصة بيتحفظ في sessions[k].hw
+   والتقرير بيقرا من DB.tasks بس — فالواجب اللي تسجّله من
+   لوحة اليوم ماكانش بيظهر في التقرير خالص.
+   الدالة دي بتجمع الاتنين وكل الشاشات بتستخدمها.
+   ============================================================ */
+function allHomework(sid, from, to){
+  var out = [];
+  /* واجبات الحصص */
+  for(var k in DB.sessions){
+    var p = k.split("|");
+    var d = p[1];
+    if(from && d < from) continue;
+    if(to && d > to) continue;
+    var v = (DB.sessions[k].hw||{})[sid];
+    if(!v) continue;
+    var g = groupById(p[0]);
+    var S = HW_STATES.filter(function(x){ return x.id===v; })[0] || { n:v, c:"" };
+    out.push({ kind:"ses", date:d, gid:p[0], g: g? g.name : "—",
+               title: (DB.sessions[k].title || "واجب حصة "+fmtD(d)),
+               type: "واجب حصة",
+               state: v, stateName: S.n, cls: S.c, done: v==="done" });
+  }
+  /* المهام العامة */
+  DB.tasks.forEach(function(t){
+    if(from && t.date < from) return;
+    if(to && t.date > to) return;
+    if(!groupStudents(t.gid).some(function(x){ return x.id===sid; })) return;
+    var ok2 = !!(t.done||{})[sid];
+    var g2 = groupById(t.gid);
+    out.push({ kind:"task", date:t.date, gid:t.gid, id:t.id,
+               g: g2? g2.name : "—", title: t.title, type: taskKindName(t.kind),
+               state: ok2? "done":"no", stateName: ok2? "سلّم":"لم يسلّم",
+               cls: ok2? "ok":"bad", done: ok2 });
+  });
+  return out.sort(function(a,b){ return String(b.date).localeCompare(String(a.date)); });
+}
 function hwRate(sid, gid){
   var tot=0, ok2=0;
   for(var k in DB.sessions){
@@ -1440,6 +1533,9 @@ function payDel(p){
     if(x.id===p.dueId){ x.paid=false; x.paidAt=""; } });
 }
 function payAdd(o){
+  setTimeout(function(){
+    queueOp("pay", { gid:o.gid, date:o.date||today(), sid:o.sid, amount:o.amount });
+  }, 0);
   var p = { id:uid("p"), sid:o.sid, gid:o.gid, amount:num(o.amount),
             date:o.date || today(), kind:o.kind || "month", at:Date.now(),
             by: (DB.meta.name || "المدرّس") };
@@ -1995,6 +2091,8 @@ function sesOf(gid, d){ return DB.sessions[sesKey(gid,d)] || null; }
 function attOf(gid, d, sid){ var s = sesOf(gid,d); return s ? (s.att||{})[sid] : undefined; }
 /* بنسجّل وقت الرصد كمان — يظهر في ملف الطالب */
 function setAtt(gid, d, sid, v){
+  /* بيتسجّل في الطابور — عشان يتزامن لو النت كان واقع */
+  setTimeout(function(){ queueOp("att", { gid:gid, date:d, sid:sid, v:v }); }, 0);
   var k = sesKey(gid,d);
   if(!DB.sessions[k]) DB.sessions[k] = { att:{}, at:Date.now() };
   if(!DB.sessions[k].att) DB.sessions[k].att = {};
@@ -2417,6 +2515,24 @@ function viewHome(){
   var doneN = gs.filter(function(g){ return sesState(g.id,d)==="done"; }).length;
   var dueRem = dueReminders().length;
 
+  /* ============================================================
+     حالة المزامنة — بتبان بس لما يكون فيه عمليات مستنية
+     ============================================================ */
+  var qn = queueCount();
+  if(qn){
+    h += '<div class="note '+(navigator.onLine?"warn":"")+'" style="margin-bottom:11px;'+
+      'display:flex;align-items:center;gap:9px;flex-wrap:wrap">'+
+      '<span style="flex:1"><b>'+ar(qn)+' عملية مستنية المزامنة</b><br>'+
+        '<span style="font-size:12.5px">'+
+        (navigator.onLine
+          ? 'محفوظة على جهازك — اضغط زامن دلوقتي'
+          : 'مفيش إنترنت. بياناتك محفوظة وهتترفع أول ما النت يرجع.')+
+        '</span></span>'+
+      (navigator.onLine
+        ? '<button class="btn sm" data-act="flushQ">↻ زامن دلوقتي</button>' : '')+
+      '</div>';
+  }
+
   h += '<div class="stats">'+
     stat("حصص النهاردة", ar(gs.length),
          gs.length? ("خلص "+ar(doneN)+" من "+ar(gs.length)) : "مفيش حصص",
@@ -2436,6 +2552,34 @@ function viewHome(){
       '<div class="s">'+(D.old.length? ar(D.old.length)+' مستحق · اضغط للتفاصيل':'مفيش')+'</div>'+
     '</button>'+
   '</div>';
+
+  /* ============================================================
+     الغائبين النهاردة — بأسمائهم مش رقم بس
+     ============================================================ */
+  var absList = [];
+  gs.forEach(function(g2){
+    var o2 = sesOf(g2.id, d) || { att:{} };
+    groupStudents(g2.id).forEach(function(st2){
+      if((o2.att||{})[st2.id]==="A") absList.push({ s:st2, g:g2 });
+    });
+  });
+  if(absList.length){
+    h += '<div class="card"><div class="hd"><h3>غايبين النهاردة</h3>'+
+      '<span class="tag bad">'+ar(absList.length)+'</span></div><div class="bd flush">';
+    absList.forEach(function(x){
+      h += '<div class="item" style="cursor:default">'+
+        '<button class="av b" data-act="openStu" data-s="'+x.s.id+'" '+
+          'style="border:0;cursor:pointer">'+esc(initials(x.s.name))+'</button>'+
+        '<span class="tx" data-act="openStu" data-s="'+x.s.id+'" style="cursor:pointer">'+
+          '<b>'+esc(x.s.name)+'</b><small>'+esc(x.g.name)+'</small></span>'+
+        '<span class="tag bad">غايب</span>'+
+        (contactOf(x.s)
+          ? '<button class="btn sm" data-act="waAbsent" data-s="'+x.s.id+'" data-g="'+x.g.id+
+            '" data-d="'+d+'" style="background:var(--warn);padding:6px 10px">✆ بلّغ</button>' : '')+
+        '</div>';
+    });
+    h += '</div></div>';
+  }
 
   /* الحضور والغياب */
   if(A.total){
@@ -2691,9 +2835,15 @@ function viewGroup(gid){
               '" data-s="'+s.id+'" data-v="A" title="غايب">✕</button>'+
           '</span>'+
           /* الواجب */
-          '<button class="btn '+(tk? "ok":"ghost")+' sm" data-act="gTask" data-g="'+gid+
-            '" data-d="'+d0+'" data-s="'+s.id+'" style="padding:7px 11px">'+
-            esc(tk? HW_STATES.filter(function(x){ return x.id===tk; })[0].n : "واجب")+'</button>'+
+          (function(){
+            var S = tk ? (HW_STATES.filter(function(x){ return x.id===tk; })[0]||{}) : null;
+            var cls = !tk ? "ghost" : (tk==="done" ? "ok" : (tk==="no" ? "bad" : "ghost"));
+            var extra = (tk && tk!=="done" && tk!=="no")
+              ? ";background:var(--warn);color:#fff;border-color:transparent" : "";
+            return '<button class="btn '+cls+' sm" data-act="gTask" data-g="'+gid+
+              '" data-d="'+d0+'" data-s="'+s.id+'" style="padding:7px 11px'+extra+'">'+
+              esc(S ? S.n : "واجب")+'</button>';
+          })()+
           /* الدفع */
           (P.exempt
             ? '<span class="tag ok" style="padding:8px 12px">★ معفي من الدفع</span>'
@@ -3043,6 +3193,32 @@ function viewStudent(sid){
     });
     if(hist.length>20) h += '<div class="item mut" style="cursor:default;justify-content:center">'+
       '<span class="tx" style="text-align:center">…وكمان '+ar(hist.length-20)+' حصة</span></div>';
+    h += '</div></div>';
+  }
+
+  /* سجل الواجبات — من المصدر الموحّد */
+  var hwAll = allHomework(sid);
+  if(hwAll.length){
+    var hwDone = hwAll.filter(function(x){ return x.done; }).length;
+    var hwPct = Math.round(hwDone/hwAll.length*100);
+    h += '<div class="card"><div class="hd"><h3>الواجبات</h3>'+
+      '<span class="tag '+(hwPct>=80?"ok":(hwPct>=50?"warn":"bad"))+'">'+ar(hwPct)+'٪</span>'+
+      '</div><div class="bd">'+
+      '<div class="stats" style="margin-bottom:0">'+
+        stat("المطلوب", ar(hwAll.length),"","")+
+        stat("عمل الواجب", ar(hwDone),"","money")+
+        stat("لم يعمل", ar(hwAll.length-hwDone),"", (hwAll.length-hwDone)?"late":"")+
+      '</div><div class="sep"></div>'+
+      '<div style="border:1px solid var(--line);border-radius:11px;overflow:hidden">'+
+      hwAll.slice(0,12).map(function(x){
+        return '<div class="item" style="cursor:default;padding:9px 12px">'+
+          '<span class="av'+(x.done?" g":" b")+'">'+(x.done?"✓":"✕")+'</span>'+
+          '<span class="tx"><b style="font-size:13.5px;white-space:normal">'+esc(x.title)+'</b>'+
+            '<small>'+fmtD(x.date)+' · '+esc(x.g)+'</small></span>'+
+          '<span class="tag '+(x.done?"ok":"bad")+'">'+esc(x.stateName)+'</span></div>';
+      }).join("")+'</div>';
+    if(hwAll.length>12) h += '<div class="mut" style="font-size:12px;text-align:center;'+
+      'margin-top:6px">…وكمان '+ar(hwAll.length-12)+' واجب</div>';
     h += '</div></div>';
   }
 
@@ -4882,6 +5058,24 @@ function nextSession(g){
 /* ============================================================
    النوافذ
    ============================================================ */
+/* ============================================================
+   الحفاظ على مكان التمرير
+   المشكلة: بعد تسجيل حضور طالب رقم ١٥، الشاشة كانت بترجع لأول
+   القائمة فالمدرّس ينزل تاني. دلوقتي بنحفظ المكان قبل الرسم
+   ونرجّعه بعده — فالمدرّس يفضل عند نفس الطالب.
+   ============================================================ */
+function keepScroll(fn){
+  var box = document.querySelector("#modal .mb");
+  var y1 = box ? box.scrollTop : 0;
+  var y2 = window.scrollY || window.pageYOffset || 0;
+  fn();
+  /* بنرجّع المكان بعد ما المتصفح يخلّص الرسم */
+  requestAnimationFrame(function(){
+    var b2 = document.querySelector("#modal .mb");
+    if(b2 && y1) b2.scrollTop = y1;
+    if(y2) window.scrollTo(0, y2);
+  });
+}
 function openModal(html){
   $("#modal").innerHTML = html;
   $("#mask").classList.add("on");
@@ -5246,9 +5440,16 @@ function sesModalHTML(gid, d){
           '<button class="'+(v==="A"?"on a":"")+'" data-act="gAtt" data-g="'+gid+'" data-d="'+d+
             '" data-s="'+s.id+'" data-v="A" title="غايب">✕</button>'+
         '</span>'+
-        '<button class="btn '+(tk?"ok":"ghost")+' sm" data-act="gTask" data-g="'+gid+
-          '" data-d="'+d+'" data-s="'+s.id+'" style="padding:6px 10px">'+
-          esc(tk? (HW_STATES.filter(function(x){return x.id===tk})[0]||{}).n || "واجب" : "واجب")+'</button>'+
+        (function(){
+          /* لون الواجب: تم = أخضر · لم يحل = أحمر · لسه = رمادي */
+          var S = tk ? (HW_STATES.filter(function(x){ return x.id===tk; })[0]||{}) : null;
+          var cls = !tk ? "ghost" : (tk==="done" ? "ok" : (tk==="no" ? "bad" : "ghost"));
+          var extra = (tk && tk!=="done" && tk!=="no")
+            ? ";background:var(--warn);color:#fff;border-color:transparent" : "";
+          return '<button class="btn '+cls+' sm" data-act="gTask" data-g="'+gid+
+            '" data-d="'+d+'" data-s="'+s.id+'" style="padding:6px 10px'+extra+'">'+
+            esc(S ? S.n : "واجب")+'</button>';
+        })()+
         (r.ex ? ''
           : ((r.need + r.old) > 0
             ? '<button class="btn ok sm" data-act="payNow" data-g="'+gid+'" data-s="'+s.id+
@@ -5835,18 +6036,15 @@ function stuReportData(sid, from, to){
   att.rate = att.total ? Math.round(att.present/att.total*100) : 100;
 
   /* الواجبات */
-  var tk = { total:0, done:0, rows:[] };
-  DB.tasks.forEach(function(t){
-    if(from && t.date < from) return;
-    if(to && t.date > to) return;
-    if(!groupStudents(t.gid).some(function(x){ return x.id===sid; })) return;
-    tk.total++;
-    var ok2 = !!(t.done||{})[sid];
-    if(ok2) tk.done++;
-    tk.rows.push({ date:t.date, title:t.title, kind:taskKindName(t.kind), done:ok2,
-                   g:(groupById(t.gid)||{}).name||"" });
+  /* الواجبات — من المصدر الموحّد (حصص + مهام) */
+  var hwRows = allHomework(sid, from, to);
+  var tk = { total: hwRows.length, done: 0, missed: 0, rows: [] };
+  hwRows.forEach(function(x){
+    if(x.done) tk.done++; else tk.missed++;
+    tk.rows.push({ date:x.date, title:x.title, kind:x.type,
+                   done:x.done, state:x.state, stateName:x.stateName,
+                   cls:x.cls, g:x.g });
   });
-  tk.rows.sort(function(a,b){ return String(b.date).localeCompare(String(a.date)); });
   tk.pct = tk.total ? Math.round(tk.done/tk.total*100) : 100;
 
   /* الامتحانات */
@@ -7424,6 +7622,7 @@ var ACTS = {
   saveGroup: saveGroup,
   openGroup: function(el){ UI.sub = { g: el.dataset.g }; render(); },
   lateRep:    function(el){ modalLateRep(el.dataset.g); },
+  flushQ:     function(){ flushQueue(true); },
   duesToday:  function(){ modalDues("today"); },
   duesOld:    function(){ modalDues("old"); },
   duesPrint:  function(el){ closeModal(); printDues(el.dataset.w); },
@@ -7475,9 +7674,11 @@ var ACTS = {
       }
     }
     saveSync();
-    if(UI.sesG && document.getElementById("mask").classList.contains("on"))
-      $("#modal").innerHTML = sesModalHTML(UI.sesG, UI.sesD);
-    render();
+    keepScroll(function(){
+      if(UI.sesG && document.getElementById("mask").classList.contains("on"))
+        $("#modal").innerHTML = sesModalHTML(UI.sesG, UI.sesD);
+      render();
+    });
   },
   gTask: function(el){
     var cur = dayTaskOf(el.dataset.g, el.dataset.d, el.dataset.s);
@@ -7497,8 +7698,10 @@ var ACTS = {
   gTaskSet: function(el){
     setDayTask(el.dataset.g, el.dataset.d, el.dataset.s, el.dataset.v||"");
     closeModal();
-    if(UI.sesG) modalSession(UI.sesG, UI.sesD);
-    render();
+    keepScroll(function(){
+      if(UI.sesG) modalSession(UI.sesG, UI.sesD);
+      render();
+    });
     toast(el.dataset.v? "اتسجّل الواجب" : "اتمسح");
   },
   gPay: function(el){
