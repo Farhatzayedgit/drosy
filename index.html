@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "6.3";
+var APP_VER = "6.4";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -2600,8 +2600,23 @@ function viewGroup(gid){
       esc(monthName(k2))+'</button>';
   }).join("")+'</div>';
 
+  /* ملخّص التحصيل لليوم المختار — نفس منطق نافذة الحصة */
+  var _d0 = UI.gDay || today();
+  var _rows = st.map(function(x){ return payStatus(x.id, _d0); }).filter(Boolean);
+  var _pay  = _rows.filter(function(x){ return !x.exempt; });
+  var _owe  = _pay.filter(function(x){ return x.total > 0; });
+  var _sum  = _owe.reduce(function(a,x){ return a + x.total; }, 0);
+  var _got  = _pay.reduce(function(a,x){ return a + x.paidToday; }, 0);
+
   var M = groupMoney(g, mk);
   h += '<div class="stats">'+
+    '<button class="stat'+(_sum?" late":"")+'" data-act="openSes" data-g="'+gid+'" data-d="'+_d0+'" '+
+      'style="border:1px solid var(--line);cursor:pointer;text-align:right;font:inherit">'+
+      '<div class="k">تحصيل '+fmtD(_d0)+'</div>'+
+      '<div class="v"'+(_sum?' style="color:var(--bad)"':'')+'>'+money(_sum)+'</div>'+
+      '<div class="s">'+(_owe.length? ar(_owe.length)+' من '+ar(_pay.length)+' عليهم فلوس'
+        : (_pay.length? 'كله سديد' : 'كلهم معفيين'))+
+        (_got? ' · اتحصّل '+money(_got):'')+'</div></button>'+
     stat("كود المجموعة", '<span style="letter-spacing:.08em">'+esc(g.code||"—")+'</span>',
          "المفتاح الثابت للاستيراد", "")+
     stat("الطلاب", ar(st.length), "", "")+
@@ -2638,21 +2653,31 @@ function viewGroup(gid){
       '<p>ضيف طلاب عشان تسجّل حضورهم وتحصّل منهم.</p></div>';
   }else{
     st.forEach(function(s){
-      var P = payStateOf(s, g, mk);
+      /* نفس الدالة المركزية اللي بتستخدمها لوحة اليوم — مصدر واحد */
+      var P = payStatus(s.id, d0) || { exempt:true, mode:"free", dueToday:0, arrears:0,
+                                       paidToday:0, total:0, label:"معفي" };
       var att = attOf(gid, d0, s.id);
       var tk = dayTaskOf(gid, d0, s.id);
       h += '<div class="item" style="cursor:default;align-items:flex-start;flex-direction:column;gap:8px">'+
         /* السطر الأول: الاسم والحالات */
         '<div style="display:flex;gap:9px;width:100%;align-items:center">'+
-          '<button class="av'+(P.rest?" b":(P.mode==="free"?"":" g"))+'" '+
+          '<button class="av'+(P.total?" b":(P.exempt?"":" g"))+'" '+
             'data-act="openStu" data-s="'+s.id+'" style="border:0;cursor:pointer">'+
             esc(initials(s.name))+'</button>'+
           '<span class="tx" data-act="openStu" data-s="'+s.id+'" style="cursor:pointer">'+
             '<b>'+esc(s.name)+'</b><small>'+
-            esc(payModeName(P.mode))+' · '+esc(P.label)+
-            (P.rest? ' ('+money(P.rest)+')' : '')+'</small></span>'+
-          '<span class="tag '+(P.cls||"")+'">'+
-            (P.mode==="free"? "معفي" : (P.rest? money(P.rest) : "سديد"))+'</span>'+
+            (P.exempt ? '★ معفي من الدفع'
+              : esc(payModeName(P.mode))+' · '+
+                (P.dueToday
+                  ? '<b style="color:var(--bad)">مستحق النهاردة '+money(P.dueToday)+'</b>'
+                  : (P.paidToday ? '<b style="color:var(--ok)">اتدفع '+money(P.paidToday)+'</b>'
+                                 : (P.arrears? '' : 'سديد')))+
+                (P.arrears? (P.dueToday||P.paidToday? ' · ':'')+
+                  '<b style="color:var(--bad)">متأخر '+money(P.arrears)+'</b>' : '')+
+                ((P.dueToday&&P.arrears)? ' · الإجمالي '+money(P.total) : ''))+
+            '</small></span>'+
+          '<span class="tag '+(P.exempt?"ok":(P.total?"bad":"ok"))+'">'+
+            (P.exempt? "معفي" : (P.total? money(P.total) : "سديد"))+'</span>'+
         '</div>'+
         /* السطر الثاني: الأزرار */
         '<div style="display:flex;gap:6px;width:100%;flex-wrap:wrap;padding-inline-start:47px">'+
@@ -2670,14 +2695,14 @@ function viewGroup(gid){
             '" data-d="'+d0+'" data-s="'+s.id+'" style="padding:7px 11px">'+
             esc(tk? HW_STATES.filter(function(x){ return x.id===tk; })[0].n : "واجب")+'</button>'+
           /* الدفع */
-          (P.mode==="free"
-            ? '<span class="tag ok" style="padding:8px 12px">★ '+esc(P.label)+'</span>'
-            : (P.rest
-              ? '<button class="btn ok sm" data-act="gPay" data-g="'+gid+'" data-s="'+s.id+
-                '" data-m="'+mk+'" style="padding:7px 11px">₤ سدّد '+money(P.rest)+'</button>'
-              : (P.n
-                ? '<button class="btn ghost sm" data-act="gPay" data-g="'+gid+'" data-s="'+s.id+
-                  '" data-m="'+mk+'" style="padding:7px 11px;color:var(--mut)">✓ مدفوع</button>'
+          (P.exempt
+            ? '<span class="tag ok" style="padding:8px 12px">★ معفي من الدفع</span>'
+            : (P.total
+              ? '<button class="btn ok sm" data-act="payNow" data-g="'+gid+'" data-s="'+s.id+
+                '" data-d="'+d0+'" style="padding:7px 11px">₤ دفع '+money(P.total)+'</button>'
+              : (P.paidToday
+                ? '<button class="btn ghost sm" data-act="payNow" data-g="'+gid+'" data-s="'+s.id+
+                  '" data-d="'+d0+'" style="padding:7px 11px;color:var(--ok)">✓ مدفوع</button>'
                 : '')))+
           /* رسالة الغياب */
           (att==="A" && contactOf(s)
