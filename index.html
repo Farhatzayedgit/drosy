@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "6.6";
+var APP_VER = "6.7";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -6028,14 +6028,50 @@ function printCards(ids){
    والواجبات ودرجات الامتحانات والفلوس — في ورقة واحدة للطباعة
    أو للإرسال لولي الأمر.
    ============================================================ */
+/* أقدم تاريخ فيه بيانات للطالب — عشان التقرير ما يطلعش فاضي */
+function firstDataDate(sid){
+  var first = "";
+  function tk(d){ if(d && (!first || d < first)) first = d; }
+  for(var k in DB.sessions){
+    var p = k.split("|");
+    if((DB.sessions[k].att||{})[sid]!==undefined || (DB.sessions[k].hw||{})[sid]) tk(p[1]);
+  }
+  DB.tasks.forEach(function(t){
+    if((t.done||{})[sid]!==undefined) tk(t.date); });
+  DB.exams.forEach(function(e){
+    if((e.marks||{})[sid]!==undefined) tk(String(e.date||"").slice(0,10)); });
+  DB.pays.forEach(function(x){ if(x.sid===sid) tk(x.date); });
+  (DB.sesDue||[]).forEach(function(x){ if(x.sid===sid) tk(x.date); });
+  var st = studentById(sid);
+  if(st && st.joinDate) tk(st.joinDate);
+  return first;
+}
 function modalStuReport(sid){
   var s = studentById(sid); if(!s) return;
-  /* المدة الافتراضية: من أول الشهر لحد النهاردة */
+  /* ============================================================
+     المدة الافتراضية = من أول بيانات الطالب لحد النهاردة.
+     كانت «من أول الشهر» فأي بيانات أقدم من كده ماكانتش بتظهر،
+     والتقرير كان بيطلع فاضي من غير ما يقول ليه.
+     ============================================================ */
   var now = new Date();
-  var from0 = new Date(now.getFullYear(), now.getMonth(), 1);
+  var f0 = firstDataDate(sid);
+  var from0 = f0 ? new Date(f0) : new Date(now.getFullYear(), now.getMonth(), 1);
   openModal(mh("تقرير: "+s.name)+'<div class="mb">'+
-    '<div class="note" style="margin-bottom:11px">اختار المدة والتقرير هيجمّع فيها '+
-      'الحضور والغياب والواجبات ودرجات الامتحانات والفلوس.</div>'+
+    (function(){
+      var R0 = stuReportData(sid, iso(from0), today());
+      var any = R0.att.total || R0.tk.total || R0.ex.rows.length || R0.money.rows.length;
+      return any
+        ? '<div class="note ok" style="margin-bottom:11px">'+
+          '<b>البيانات المتاحة:</b> '+
+          [R0.att.total? ar(R0.att.total)+" حصة":"",
+           R0.tk.total? ar(R0.tk.total)+" واجب":"",
+           R0.ex.rows.length? ar(R0.ex.rows.length)+" امتحان":"",
+           R0.money.rows.length? ar(R0.money.rows.length)+" دفعة":""
+          ].filter(Boolean).join(" · ")+'</div>'
+        : '<div class="note warn" style="margin-bottom:11px">'+
+          '<b>مفيش بيانات مسجّلة للطالب ده لسه</b><br>'+
+          'التقرير هيطلع فاضي. ارصد حضور أو واجب أو درجة الأول.</div>';
+    })()+
     '<div class="grid2">'+
     '<label class="f"><span>من تاريخ</span>'+
       '<input type="date" id="sr_from" value="'+iso(from0)+'"></label>'+
@@ -6340,9 +6376,23 @@ function healthCheck(){
   var ghostTk = 0;
   DB.tasks.forEach(function(t){
     Object.keys(t.done||{}).forEach(function(sid){ if(!sIds[sid]) ghostTk++; }); });
+  Object.keys(DB.sessions).forEach(function(k){
+    Object.keys(DB.sessions[k].hw||{}).forEach(function(sid){ if(!sIds[sid]) ghostTk++; }); });
   add("واجبات لطلاب محذوفين", ghostTk, function(){
     DB.tasks.forEach(function(t){
-      Object.keys(t.done||{}).forEach(function(sid){ if(!sIds[sid]) delete t.done[sid]; }); }); });
+      Object.keys(t.done||{}).forEach(function(sid){ if(!sIds[sid]) delete t.done[sid]; }); });
+    Object.keys(DB.sessions).forEach(function(k){
+      Object.keys(DB.sessions[k].hw||{}).forEach(function(sid){
+        if(!sIds[sid]) delete DB.sessions[k].hw[sid]; }); }); });
+
+  /* ملاحظات الحصص لطلاب محذوفين */
+  var ghostNt = 0;
+  Object.keys(DB.sessions).forEach(function(k){
+    Object.keys(DB.sessions[k].notes||{}).forEach(function(sid){ if(!sIds[sid]) ghostNt++; }); });
+  add("ملاحظات لطلاب محذوفين", ghostNt, function(){
+    Object.keys(DB.sessions).forEach(function(k){
+      Object.keys(DB.sessions[k].notes||{}).forEach(function(sid){
+        if(!sIds[sid]) delete DB.sessions[k].notes[sid]; }); }); });
 
   var badFam = DB.students.filter(function(x){
     return x.famId && !DB.families.some(function(f){ return f.id===x.famId; }); });
@@ -7857,7 +7907,10 @@ var ACTS = {
     DB.pays   = DB.pays.filter(function(p){ return p.sid!==s.id; });
     DB.sesDue = (DB.sesDue||[]).filter(function(x){ return x.sid!==s.id; });
     Object.keys(DB.sessions).forEach(function(k){
-      if(DB.sessions[k].att) delete DB.sessions[k].att[s.id]; });
+      if(DB.sessions[k].att)   delete DB.sessions[k].att[s.id];
+      if(DB.sessions[k].hw)    delete DB.sessions[k].hw[s.id];      /* واجب الحصة */
+      if(DB.sessions[k].notes) delete DB.sessions[k].notes[s.id];   /* الملاحظات */
+    });
     DB.exams.forEach(function(e){
       if(e.marks) delete e.marks[s.id];
     });
