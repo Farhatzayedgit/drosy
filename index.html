@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "6.5";
+var APP_VER = "6.6";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -3023,6 +3023,7 @@ function viewStudents(){
     h += '<button class="item" data-act="openStu" data-s="'+s.id+'">'+
       '<span class="av'+(d.rest?" b":"")+'">'+esc(initials(s.name))+'</span>'+
       '<span class="tx"><b>'+esc(s.name)+'</b><small>'+
+        (contactOf(s)? '<span style="direction:ltr">'+esc(contactOf(s))+'</span> · ':'')+
         (gs.length? esc(gs.map(function(g){ return g.name; }).join(" · ")) : "مش في مجموعة")+
         (s.grade? ' · '+esc(s.grade) : '')+'</small></span>'+
       (d.rest? '<span class="tag bad">'+money(d.rest)+'</span>' : '<span class="tag ok">سديد</span>')+
@@ -3195,6 +3196,53 @@ function viewStudent(sid){
       '<span class="tx" style="text-align:center">…وكمان '+ar(hist.length-20)+' حصة</span></div>';
     h += '</div></div>';
   }
+
+  /* ============================================================
+     البيانات والتواصل
+     الأرقام كانت بتتحفظ من الحجز صح بس ماكانتش بتتعرض هنا.
+     ============================================================ */
+  (function(){
+    var g0 = studentGroups(s);
+    var ex0 = exemptInfo(s);
+    var rows0 = [
+      ["الكود", s.code, "▣"],
+      ["الصف", s.grade, "◈"],
+      ["المجموعات", g0.map(function(x){ return x.name; }).join(" · "), "▤"],
+      ["نظام الدفع", payModeName(payModeOf(s)) + (ex0? " — معفي" : ""), "₤"],
+      ["تاريخ الانضمام", s.joinDate? fmtD(s.joinDate) : "", "◷"],
+      ["مكان الحجز", s.addr, "📍"],
+      ["ولي الأمر", s.guard, "⚯"]
+    ];
+    var phones = [["رقم الطالب", s.phone], ["رقم ولي الأمر", s.guardPhone]];
+    h += '<div class="card"><div class="hd"><h3>البيانات والتواصل</h3>'+
+      '<button class="btn ghost sm" data-act="editStu" data-s="'+sid+'">تعديل</button>'+
+      '</div><div class="bd flush">'+
+      rows0.map(function(r){
+        if(!r[1]) return "";
+        return '<div class="item" style="cursor:default;padding:9px 12px">'+
+          '<span class="av">'+r[2]+'</span>'+
+          '<span class="tx"><b style="font-size:13.5px">'+esc(r[1])+'</b>'+
+          '<small>'+esc(r[0])+'</small></span></div>';
+      }).join("")+
+      phones.map(function(r){
+        if(!r[1]) return "";
+        return '<div class="item" style="cursor:default;padding:9px 12px;flex-wrap:wrap">'+
+          '<span class="av">☎</span>'+
+          '<span class="tx"><b style="font-size:14px;direction:ltr;text-align:right">'+
+            esc(r[1])+'</b><small>'+esc(r[0])+'</small></span>'+
+          '<a class="btn ghost sm" href="tel:'+esc(r[1])+'" '+
+            'style="text-decoration:none;padding:5px 9px;flex:0 0 auto">اتصال</a>'+
+          '<a class="btn ghost sm" href="'+esc(waLink(r[1],""))+'" target="_blank" '+
+            'style="text-decoration:none;padding:5px 9px;flex:0 0 auto">واتساب</a>'+
+          '</div>';
+      }).join("")+
+      (s.note? '<div class="item" style="cursor:default;padding:9px 12px;align-items:flex-start">'+
+        '<span class="av">✎</span><span class="tx">'+
+        '<b style="font-size:13.5px;white-space:normal">'+esc(s.note)+'</b>'+
+        '<small>ملاحظات</small></span></div>' : '')+
+      '</div></div>';
+  })();
+
 
   /* سجل الواجبات — من المصدر الموحّد */
   var hwAll = allHomework(sid);
@@ -8444,7 +8492,7 @@ function verifyLocalAuth(pw){
   }).catch(function(){ return false; });
 }
 /* جلسة محلية بمدة — مش مفتوحة للأبد */
-var LOCAL_SESSION_HOURS = 12;
+var LOCAL_SESSION_HOURS = 24 * 7;   /* أسبوع — مش هيطلب دخول كل مرة */
 function startLocalSession(){
   try{
     localStorage.setItem(KEY+"_sess", JSON.stringify({
@@ -8707,6 +8755,11 @@ function restoreSession(){
   /* جلسة محلية محفوظة؟ ندخل على طول من غير ما نستنى السحابة */
   var s0 = null;
   try{ s0 = JSON.parse(localStorage.getItem(KEY+"_sess")||"null"); }catch(e){}
+  /* الجلسة القديمة من غير مدة → نديها مدة بدل ما نطردها */
+  if(s0 && !s0.exp){
+    s0.exp = Date.now() + LOCAL_SESSION_HOURS*3600000;
+    try{ localStorage.setItem(KEY+"_sess", JSON.stringify(s0)); }catch(e){}
+  }
   if(s0 && s0.r==="local"){
     FB.role = "teacher";
     render();
