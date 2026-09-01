@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "6.7";
+var APP_VER = "6.8";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -648,12 +648,88 @@ function pubSnapshot(){
       gs: gs.map(function(x){ return normCode(x.code); })
     };
   });
+  /* ============================================================
+     بيانات كل طالب — من نفس مصادر المدرّس بالظبط
+     المشكلة اللي كانت: الدليل بيتنشر بس البيانات نفسها لأ،
+     فالطالب بيدخل ويلاقي بوابته فاضية.
+     كل طالب بياخد نسخته تحت كوده، فمايشوفش غير بتاعه.
+     ============================================================ */
+  var mine = {};
+  activeStudents().forEach(function(st){
+    if(!st.code) return;
+    var code = normCode(st.code);
+    var gsS = studentGroups(st);
+    /* الحضور — من نفس سجل الحصص */
+    var att = [];
+    for(var k in DB.sessions){
+      var pp = k.split("|");
+      var v = (DB.sessions[k].att||{})[st.id];
+      if(v===undefined) continue;
+      var gA = groupById(pp[0]);
+      att.push({ d:pp[1], v:v, g: gA? gA.name : "" });
+    }
+    att.sort(function(a,b){ return String(b.d).localeCompare(String(a.d)); });
+    /* الواجبات — من المصدر الموحّد */
+    var tasks = [];
+    try{
+      tasks = allHomework(st.id).slice(0,40).map(function(x){
+        return { title:x.title, date:x.date, kind:x.g,
+                 state:x.state, stateName:x.stateName, done:x.done };
+      });
+    }catch(e){}
+    /* الامتحانات ونتايجها */
+    var exs = [];
+    DB.exams.forEach(function(e){
+      if(!gsS.some(function(g){ return g.id===e.gid; })) return;
+      var row = { id:e.id, title:e.title, date:String(e.date||"").slice(0,10),
+                  online: !!e.online, max: isOnlineExam(e)? examTotalMark(e) : num(e.max,0) };
+      if(isOnlineExam(e)){
+        var a = attemptsOf(e.id, st.id).filter(function(x){ return x.submittedAt; })
+          .sort(function(x,y){ return num(y.total,0)-num(x.total,0); })[0];
+        if(a){
+          a = gradeAttempt(a);
+          row.done = true; row.pending = !!a.pending;
+          if(canSeeResult(e, a)) row.mark = a.total;
+        }
+      }else{
+        var mv = (e.marks||{})[st.id];
+        if(mv!==undefined && mv!==null && mv!==""){ row.done = true; row.mark = num(mv); }
+      }
+      exs.push(row);
+    });
+    exs.sort(function(a,b){ return String(b.date).localeCompare(String(a.date)); });
+    /* المستحقات */
+    var exempt = false, dues = [];
+    try{
+      exempt = isExempt(st);
+      if(!exempt) dues = duesOf(st.id, today())
+        .filter(function(x){ return num(x.rest)>0; })
+        .map(function(x){
+          return { what:x.what, date:x.date, kind:x.kind,
+                   amount:num(x.amount), paidAmt:num(x.paidAmt||0), rest:num(x.rest) };
+        });
+    }catch(e){}
+    /* جدول الحصص */
+    var sched = gsS.map(function(g){
+      return { name:g.name, days:g.days||[], time:g.time||"", place:g.place||"" };
+    });
+    mine[code] = {
+      sid: st.id, name: st.name, grade: st.grade||"",
+      joinDate: st.joinDate||"", phone: st.phone||"", guardPhone: st.guardPhone||"",
+      groups: gsS.map(function(g){ return g.name; }),
+      sched: sched,
+      att: att, tasks: tasks, exams: exs, dues: dues, exempt: exempt,
+      at: Date.now()
+    };
+  });
+
   return {
     teacher: { name: DB.meta.name||"", subject: DB.meta.subject||"",
                phone: DB.meta.phone||"", about: DB.meta.about||"",
                year: DB.meta.year||"" },
     groups: groups,
     students: studs,
+    mine: mine,
     at: Date.now()
   };
 }
@@ -665,7 +741,8 @@ function syncUp(){
     fbSet("private/db", DB),
     fbSet("pub/teacher", snap.teacher),
     fbSet("pub/groups", snap.groups),
-    fbSet("pub/students", snap.students)
+    fbSet("pub/students", snap.students),
+    fbSet("pub/mine", snap.mine || {})     /* بيانات كل طالب لبوابته */
   ]).then(function(){
     SYNC.busy=false; SYNC.on=true; SYNC.at=Date.now();
     try{ localStorage.setItem(KEY+"_syncAt", String(SYNC.at)); }catch(e){}
@@ -724,9 +801,45 @@ function flushQueue(loud){
     if(loud) toast("المزامنة فشلت — العمليات محفوظة وهنعيد المحاولة");
   });
 }
-/* أول ما النت يرجع، نزامن تلقائيًا */
+/* ============================================================
+   المزامنة التلقائية
+   بتشتغل لوحدها في ٤ حالات: عودة النت · فتح البرنامج ·
+   الرجوع للتبويب · وكل دقيقتين لو فيه حاجة مستنية.
+   زرار المزامنة فاضل للتشخيص بس — النظام مش معتمد عليه.
+   ============================================================ */
+var _autoSyncBusy = false;
+function autoSync(reason){
+  if(_autoSyncBusy) return;
+  if(!navigator.onLine) return;
+  if(!fbOn() || FB.role!=="teacher") return;
+  if(!queueCount()) return;
+  _autoSyncBusy = true;
+  var n2 = queueCount();
+  syncUp().then(function(){
+    queueClear(); UI.qErr = false;
+    _autoSyncBusy = false;
+    render();
+    toast("اتزامن " + ar(n2) + " عملية");
+  }).catch(function(){
+    UI.qErr = true;
+    _autoSyncBusy = false;
+    render();
+  });
+}
+/* عودة النت */
 window.addEventListener("online", function(){
-  setTimeout(function(){ if(queueCount()) flushQueue(false); }, 1500);
+  setTimeout(function(){ autoSync("online"); }, 1200);
+});
+/* الرجوع للتبويب */
+document.addEventListener("visibilitychange", function(){
+  if(!document.hidden) setTimeout(function(){ autoSync("visible"); }, 600);
+});
+/* كل دقيقتين */
+setInterval(function(){ autoSync("tick"); }, 120000);
+/* الطالب: تحديث بياناته تلقائيًا كل دقيقة وعند الرجوع للتبويب */
+setInterval(function(){ try{ stuAutoRefresh(); }catch(e){} }, 60000);
+document.addEventListener("visibilitychange", function(){
+  if(!document.hidden) setTimeout(function(){ try{ stuAutoRefresh(); }catch(e){} }, 800);
 });
 
 /* بيتنادى بعد أي تعديل — بيحفظ محليًا ويرفع للسحابة */
@@ -734,10 +847,14 @@ function saveSync(op){
   save();                                   /* المحلي الأول — مش بيفشل أبدًا */
   if(op) queueOp(op.type, op.data||{});
   if(!navigator.onLine || !fbOn()){
-    /* مفيش نت: العملية محفوظة محليًا ومستنية في الطابور */
     if(op) UI.qPending = true;
     return;
   }
+  /* النت شغال → بنرفع فورًا، والطابور بيتفضّى بعد النجاح */
+  clearTimeout(window._syncT);
+  window._syncT = setTimeout(function(){
+    if(queueCount()) autoSync("save");
+  }, 2500);
   if(fbOn() && FB.role==="teacher"){
     clearTimeout(window._sy);
     window._sy = setTimeout(function(){
@@ -4581,7 +4698,12 @@ function myAtt(){
            rate: tot? Math.round(pres/tot*100) : 100, rows:rows };
 }
 function myExams(){
-  var out = { next:[], now:[], past:[] };
+  var out = { next:[], now:[], past:[], graded:[] };
+  /* الامتحانات المرصودة يدويًا — من بيانات الطالب */
+  (GATE.myExamsD||[]).forEach(function(e){
+    if(e.online) return;              /* الإلكترونية بتتعالج تحت */
+    out.graded.push(e);
+  });
   (GATE.exams||[]).forEach(function(e){
     var st = examState(e);
     var a = stuAttempt(e.id);
@@ -4607,7 +4729,9 @@ function myTasks(){
 }
 /* الحصة الجاية من مواعيد المجموعة */
 function myNextSession(){
-  var g = GATE.grp;
+  /* الجدول من بيانات الطالب المنشورة — أدق من بيانات المجموعة */
+  var sc = (GATE.sched||[])[0];
+  var g = sc ? { days:sc.days, time:sc.time, place:sc.place, name:sc.name } : GATE.grp;
   if(!g || !(g.days||[]).length) return null;
   var now = new Date();
   for(var i=0;i<14;i++){
@@ -4660,8 +4784,11 @@ function viewStudentPortal(){
         '<div style="font-family:Cairo,sans-serif;font-weight:800;font-size:19px">'+
           esc(GATE.myName||"أهلًا بيك")+'</div>'+
         '<div style="font-size:12.5px;color:#A9C0BE">'+
-          esc(g.name||"")+(g.grade? ' · '+esc(g.grade):'')+
-          '<br>'+esc(T.name||"")+(T.subject? ' — '+esc(T.subject):'')+'</div>'+
+          esc((GATE.mine && GATE.mine.groups||[]).join(" · ") || g.name || "")+
+          ((GATE.mine&&GATE.mine.grade)? ' · '+esc(GATE.mine.grade) : (g.grade? ' · '+esc(g.grade):''))+
+          '<br>'+esc(T.name||"")+(T.subject? ' — '+esc(T.subject):'')+
+          ((GATE.mine&&GATE.mine.joinDate)? '<br>من '+fmtD(GATE.mine.joinDate) : '')+
+          '</div>'+
       '</div>'+
       '<button class="btn ghost sm" data-act="gOut" style="flex:0 0 auto">خروج</button>'+
     '</div></div>';
@@ -4766,6 +4893,42 @@ function viewStudentPortal(){
   }
   h += '</div></div>';
 
+  /* ---------- درجات الامتحانات المرصودة ---------- */
+  var GR = (E.graded||[]).filter(function(x){ return x.done && x.mark!==undefined; });
+  if(GR.length){
+    var sum2=0, max2=0;
+    GR.forEach(function(x){ sum2 += num(x.mark); max2 += num(x.max); });
+    h += '<div class="card"><div class="hd"><h3>درجاتي</h3>'+
+      '<span class="tag ok">'+ar(max2? Math.round(sum2/max2*100):0)+'٪</span>'+
+      '</div><div class="bd flush">';
+    GR.forEach(function(x){
+      var pct = num(x.max)? Math.round(num(x.mark)/num(x.max)*100) : 0;
+      h += '<div class="item" style="cursor:default">'+
+        '<span class="av'+(pct>=50?" g":" b")+'">'+ar(x.mark)+'</span>'+
+        '<span class="tx"><b>'+esc(x.title)+'</b><small>'+
+          fmtD(x.date)+' · '+ar(x.mark)+' من '+ar(x.max)+'</small></span>'+
+        '<span class="tag '+(pct>=50?"ok":"bad")+'">'+ar(pct)+'٪</span></div>';
+    });
+    h += '</div></div>';
+  }
+
+  /* ---------- جدول الحصص ---------- */
+  if((GATE.sched||[]).length){
+    h += '<div class="card"><div class="hd"><h3>مواعيد حصصي</h3></div><div class="bd">';
+    (GATE.sched||[]).forEach(function(sc){
+      h += '<div style="margin-bottom:9px">'+
+        '<b style="font-family:Cairo,sans-serif;font-size:14px">'+esc(sc.name)+'</b>'+
+        '<div class="row" style="margin-top:6px">'+
+          (sc.days||[]).map(function(dd){
+            return '<span class="tag">'+esc(DAYS[dd])+'</span>';
+          }).join("")+
+          (sc.time? '<span class="tag ok" style="direction:ltr">'+esc(sc.time)+'</span>':'')+
+          (sc.place? '<span class="tag">📍 '+esc(sc.place)+'</span>':'')+
+        '</div></div>';
+    });
+    h += '</div></div>';
+  }
+
   /* ---------- الحضور ---------- */
   h += '<div class="card"><div class="hd"><h3>الحضور</h3>'+
     (A.tot? '<span class="tag '+(A.rate>=80?"ok":(A.rate>=60?"warn":"bad"))+'">'+
@@ -4784,7 +4947,7 @@ function viewStudentPortal(){
           return '<div class="item" style="cursor:default;padding:9px 12px">'+
             '<span class="av '+L2[1]+'">'+L2[2]+'</span>'+
             '<span class="tx"><b style="font-size:13.5px">'+fmtD(x.d)+'</b><small>'+
-              esc(DAYS[dowOf(x.d)])+'</small></span>'+
+              esc(DAYS[dowOf(x.d)])+(x.g? ' · '+esc(x.g):'')+'</small></span>'+
             '<span class="tag '+(x.v==="P"?"ok":(x.v==="L"?"warn":"bad"))+'">'+L2[0]+'</span></div>';
         }).join("")+'</div>';
     }
@@ -8688,17 +8851,44 @@ function gLoadExams(){
   }).catch(function(){ GATE.exams = []; });
 }
 /* تحميل بيانات الطالب الشخصية — نفس بيانات المدرّس */
+/* ============================================================
+   تحميل بيانات الطالب — من نفس مصادر المدرّس
+   بتتحفظ محليًا كمان عشان تشتغل من غير نت.
+   ============================================================ */
 function gLoadMine(){
-  if(!fbOn() || !GATE.myCode) return Promise.resolve();
-  return fbGet("pub/mine/"+GATE.myCode).then(function(v){
+  if(!GATE.myCode) return Promise.resolve();
+  var apply = function(v){
     v = v || {};
-    GATE.att    = v.att   || [];
-    GATE.tasks  = v.tasks || [];
-    GATE.dues   = v.dues  || [];
-    GATE.exempt = !!v.exempt;
+    GATE.mine     = v;
+    GATE.att      = v.att    || [];
+    GATE.tasks    = v.tasks  || [];
+    GATE.myExamsD = v.exams  || [];
+    GATE.dues     = v.dues   || [];
+    GATE.sched    = v.sched  || [];
+    GATE.exempt   = !!v.exempt;
+    if(v.name)  GATE.myName = v.name;
+    if(v.sid)   GATE.sid    = v.sid;
+  };
+  /* من غير نت: بنستخدم آخر نسخة محفوظة */
+  if(!fbOn() || !navigator.onLine){
+    try{ apply(JSON.parse(localStorage.getItem(KEY+"_mine_"+GATE.myCode)||"null")); }
+    catch(e){ apply(null); }
+    return Promise.resolve();
+  }
+  return fbGet("pub/mine/"+GATE.myCode).then(function(v){
+    apply(v);
+    try{ localStorage.setItem(KEY+"_mine_"+GATE.myCode, JSON.stringify(v||{})); }catch(e){}
   }).catch(function(){
-    GATE.att = []; GATE.tasks = []; GATE.dues = []; GATE.exempt = false;
+    try{ apply(JSON.parse(localStorage.getItem(KEY+"_mine_"+GATE.myCode)||"null")); }
+    catch(e){ apply(null); }
   });
+}
+/* تحديث تلقائي لبيانات الطالب وهو داخل */
+function stuAutoRefresh(){
+  if(FB.role!=="student" || !GATE.myCode) return;
+  if(UI.take) return;                 /* مش وسط امتحان */
+  if(!navigator.onLine) return;
+  gLoadMine().then(function(){ render(); }).catch(function(){});
 }
 function gLoadNotices(){
   if(!fbOn() || !GATE.code) return Promise.resolve();
