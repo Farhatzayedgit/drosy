@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "6.8";
+var APP_VER = "6.9";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -631,9 +631,11 @@ function pubSnapshot(){
   DB.groups.forEach(function(g){
     if(!g.code) return;
     groups[normCode(g.code)] = {
+      id: g.id,                       /* الـid الحقيقي — عشان الحجز يربط صح */
       name: g.name||"", grade: g.grade||"", subject: g.subject||"",
       days: g.days||[], time: g.time||"", place: g.place||"",
-      fee: num(g.fee), status: g.status||"on"
+      fee: num(g.fee), status: g.status||"on",
+      bookOff: !!g.bookOff
     };
   });
   /* دليل أكواد الطلاب: الكود الشخصي → الاسم ومجموعته */
@@ -4383,6 +4385,24 @@ var BK_STATES = [
   { id:"no",   n:"مرفوض",        c:"bad"  }
 ];
 var BK_REJECT = ["المجموعة مكتملة","بيانات غير صحيحة","اتسجّل في مجموعة تانية","أخرى"];
+/* ============================================================
+   مجموعة الحجز
+   نموذج الحجز بيشتغل على البيانات العامة اللي مفتاحها **كود**
+   المجموعة، والمدرّس عنده المجموعات بالـ**id**. الدالة دي
+   بتلاقي المجموعة بأي واحد فيهم — فمفيش حجز بيضيع.
+   ============================================================ */
+function bkGroup(b){
+  if(!b) return null;
+  var k = b.agid || b.gid || "";
+  if(!k) return null;
+  var g = groupById(k);
+  if(g) return g;
+  /* مش id؟ يبقى كود */
+  var c = normCode(k);
+  for(var i=0;i<DB.groups.length;i++)
+    if(normCode(DB.groups[i].code||"") === c) return DB.groups[i];
+  return null;
+}
 function bkStateOf(b){
   var st = b.status||"new";
   if(st==="done"||st==="ok") st="done";
@@ -4395,7 +4415,10 @@ function bkStateOf(b){
 function bkGroupsFor(grade){
   var src = (GATE.pubGroups && Object.keys(GATE.pubGroups).length)
     ? Object.keys(GATE.pubGroups).map(function(c){
-        var g = GATE.pubGroups[c]; g.code = c; return g; })
+        var g = GATE.pubGroups[c];
+        g.code = c;
+        if(!g.id) g.id = c;          /* بيانات قديمة من غير id */
+        return g; })
     : DB.groups.map(function(g){ return g; });
   return src.filter(function(g){
     if(g.status==="off") return false;
@@ -4470,7 +4493,7 @@ function viewBookings(){
   h += '<div class="card"><div class="bd flush">';
   list.forEach(function(b){
     var S = bkStateOf(b);
-    var g = groupById(b.agid || b.gid);
+    var g = bkGroup(b);
     h += '<button class="item" data-act="openBk" data-i="'+esc(b.id)+'">'+
       '<span class="av'+(S.id==="new"?" w":(S.id==="done"?" g":" b"))+'">'+
         esc(initials(b.name||"?"))+'</span>'+
@@ -4493,8 +4516,8 @@ function modalBooking(id){
   if(!b){ toast("الطلب مش موجود"); return; }
   var S = bkStateOf(b);
   var sim = S.id==="new" ? findSimilar(b) : [];
-  var gid = b.agid || b.gid || "";
-  var g = groupById(gid);
+  var g = bkGroup(b);
+  var gid = g ? g.id : "";        /* الـid الحقيقي مهما كان المحفوظ */
   var glist = DB.groups.filter(function(x){ return x.status!=="off"; });
 
   var h = mh("طلب حجز")+'<div class="mb">'+
@@ -7728,8 +7751,9 @@ var ACTS = {
     var jd  = val("bk_e_jd") || today();
     if(nm.length<3){ toast("اكتب الاسم كامل"); return; }
     if(!gid){ toast("اختار المجموعة"); return; }
-    var g = groupById(gid);
+    var g = groupById(gid) || bkGroup({ gid:gid });
     if(!g){ toast("المجموعة مش موجودة"); return; }
+    gid = g.id;
     /* تحذير من التكرار */
     var sim = findSimilar({ name:nm, phone:ph, pphone:pp });
     if(sim.length && !confirm("فيه طالب مسجّل ببيانات مشابهة:\n"+
