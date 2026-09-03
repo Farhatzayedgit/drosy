@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "6.9";
+var APP_VER = "7.0";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -8946,20 +8946,50 @@ function pushNotices(){
 /* الحجز — كتابة مفتوحة مقيّدة بالقواعد */
 function gSendBooking(){
   if(!fbInit()){ GATE.msg="مش قادر أوصل للسحابة"; GATE.ok=false; render(); return; }
-  var nm = val("bk_name").trim(), gr = val("bk_grade"),
-      ph = val("bk_phone").trim(), ad = val("bk_addr").trim(), nt = val("bk_note").trim();
+  /* ============================================================
+     كل حقول النموذج بتتبعت — الرقمين منفصلين والمجموعة بالـid.
+     النسخة القديمة كانت بتبعت الاسم والصف ورقم واحد بس، فرقم
+     ولي الأمر والمجموعة كانوا بيضيعوا قبل ما يوصلوا للمدرّس.
+     ============================================================ */
+  var nm  = val("bk_name").trim(),
+      gr  = val("bk_grade"),
+      gid = val("bk_grp"),
+      ph  = val("bk_phone").trim(),
+      pp  = val("bk_pphone").trim(),
+      ad  = val("bk_addr").trim(),
+      nt  = val("bk_note").trim();
+
   if(nm.length<3){ GATE.msg="اكتب الاسم كامل"; GATE.ok=false; render(); return; }
   if(!gr){ GATE.msg="اختار الصف الدراسي"; GATE.ok=false; render(); return; }
-  var d = ph.replace(/\D/g,"");
-  if(d.length<10){ GATE.msg="رقم الموبايل مش مظبوط"; GATE.ok=false; render(); return; }
+  if(!gid){ GATE.msg="اختار المجموعة المطلوبة"; GATE.ok=false; render(); return; }
+
+  var d  = ph.replace(/\D/g,"");
+  var dp = pp.replace(/\D/g,"");
+  if(d.length<10){ GATE.msg="رقم موبايل الطالب مش مظبوط"; GATE.ok=false; render(); return; }
+  if(dp && dp.length<10){ GATE.msg="رقم ولي الأمر مش مظبوط"; GATE.ok=false; render(); return; }
+
+  /* وصف المجموعة للعرض — عشان المدرّس يعرف طلب إيه */
+  var gsel = bkGroupsFor(gr).filter(function(g){
+    return String(g.id||g.code) === String(gid); })[0];
+
   GATE.busy=true; GATE.msg=""; render();
   FB.auth.signInAnonymously().then(function(){
-    return fbPush("bookings", { name:nm.slice(0,60), grade:gr, phone:d.slice(0,15),
-      addr:ad.slice(0,120), note:nt.slice(0,200), date:today(), at:Date.now(), status:"new" });
+    return fbPush("bookings", {
+      name:   nm.slice(0,60),
+      grade:  gr,
+      phone:  d.slice(0,15),          /* موبايل الطالب */
+      pphone: dp.slice(0,15),         /* موبايل ولي الأمر */
+      gid:    gid,
+      gname:  gsel ? grpDesc(gsel) : "",
+      addr:   ad.slice(0,120),
+      note:   nt.slice(0,200),
+      date:   today(), at: Date.now(), status:"new"
+    });
   }).then(function(){
     GATE.busy=false; GATE.ok=true;
-    GATE.msg="اتسجّل حجزك ✓ المدرّس هيتواصل معاك على "+d;
-    ["bk_name","bk_phone","bk_addr","bk_note"].forEach(function(id){ var e=$("#"+id); if(e) e.value=""; });
+    GATE.msg="اتبعت طلب الحجز ✓ المدرّس هيراجعه ويتواصل معاك على "+d;
+    ["bk_name","bk_phone","bk_pphone","bk_addr","bk_note"].forEach(function(id){
+      var e=$("#"+id); if(e) e.value=""; });
     render();
   }).catch(function(e){
     GATE.busy=false; GATE.ok=false; GATE.msg=gErr(e); render();
@@ -8975,9 +9005,30 @@ function pullBookings(loud){
     var add = 0;
     Object.keys(all).forEach(function(k){
       var b = all[k]; if(!b || !b.name) return;
-      if(have[k]) return;
-      DB.bookings.push({ id:k, name:b.name, grade:b.grade||"", phone:b.phone||"",
-        addr:b.addr||"", note:b.note||"", date:b.date||"", at:b.at||0, status:b.status||"new" });
+      if(have[k]){
+        /* حجز موجود بس ناقص حقول (اتسحب بنسخة قديمة) — بنكمّله */
+        var cur = have[k];
+        if(!cur.pphone && b.pphone){ cur.pphone = b.pphone; add++; }
+        if(!cur.gid    && b.gid)   { cur.gid    = b.gid;    add++; }
+        if(!cur.gname  && b.gname) { cur.gname  = b.gname;  add++; }
+        return;
+      }
+      /* كل الحقول بتتنقل — النسخة القديمة كانت بتسيب رقم ولي
+         الأمر والمجموعة، فبيوصلوا فاضيين للمدرّس */
+      DB.bookings.push({
+        id: k,
+        name:   b.name,
+        grade:  b.grade  || "",
+        phone:  b.phone  || "",
+        pphone: b.pphone || "",      /* موبايل ولي الأمر */
+        gid:    b.gid    || "",      /* المجموعة المطلوبة */
+        gname:  b.gname  || "",
+        addr:   b.addr   || "",
+        note:   b.note   || "",
+        date:   b.date   || "",
+        at:     b.at     || 0,
+        status: b.status || "new"
+      });
       add++;
     });
     if(add){ save(); render(); }
