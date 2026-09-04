@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "7.0";
+var APP_VER = "7.1";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -2209,6 +2209,69 @@ function sesDueOf(sid){
 function sesOf(gid, d){ return DB.sessions[sesKey(gid,d)] || null; }
 function attOf(gid, d, sid){ var s = sesOf(gid,d); return s ? (s.att||{})[sid] : undefined; }
 /* بنسجّل وقت الرصد كمان — يظهر في ملف الطالب */
+/* ============================================================
+   تسجيل حضور طالب — المنطق الكامل في مكان واحد
+   المشكلة اللي كانت: زرار «الكل حاضر» كان بيسجّل الحضور بس،
+   من غير ما ينشئ مستحق الحصة — فالدفع مكانش بيظهر. بينما
+   التسجيل الفردي كان بيعمل الاتنين.
+   دلوقتي الاتنين بينادوا نفس الدالة دي.
+   ============================================================ */
+function markAtt(gid, d, sid, v){
+  setAtt(gid, d, sid, v);
+  var s = studentById(sid), g = groupById(gid);
+  if(!s || !g) return;
+  var now = attOf(gid, d, sid);
+  /* الطالب بالحصة: مستحق الحصة بيتعمل مع الحضور */
+  if(payModeOf(s)==="ses" && billEligible(s, g, d)){
+    var has = (DB.sesDue||[]).some(function(x){
+      return x.sid===sid && x.gid===gid && x.date===d; });
+    if((now==="P" || now==="L") && !has){
+      DB.sesDue.push({ id:uid("sd"), sid:sid, gid:gid, date:d,
+                       amount:num(g.fee), paid:false });
+    }
+    /* اتشال الحضور؟ نشيل المستحق طالما مادفعش */
+    if(!now){
+      DB.sesDue = (DB.sesDue||[]).filter(function(x){
+        return !(x.sid===sid && x.gid===gid && x.date===d && !duePaid(x)); });
+    }
+  }
+  return now;
+}
+/* تسجيل دفعة لطالب — نفس المنطق للفردي والجماعي */
+function markPay(sid, gid, d, amount){
+  var s = studentById(sid), g = groupById(gid);
+  if(!s || !g) return 0;
+  if(isExemptOn(s, d)) return 0;                 /* المعفي بره */
+  var dues = duesOf(sid, d).filter(function(x){ return x.date<=d && x.rest>0; });
+  if(!dues.length) return 0;                     /* مفيش مستحق */
+  var left = (amount===undefined)
+    ? dues.reduce(function(a,x){ return a+num(x.rest); }, 0)
+    : num(amount);
+  var done = 0;
+  dues.forEach(function(x){
+    if(left <= 0) return;
+    var take = Math.min(left, num(x.rest));
+    if(take <= 0) return;
+    if(x.kind === "ses"){
+      var due = (DB.sesDue||[]).filter(function(y){ return y.id===x.id; })[0];
+      if(!due) return;
+      /* حماية من التكرار: نفس المستحق مايتدفعش مرتين بالزيادة */
+      if(paidForDue(due.id) >= num(due.amount) - 0.001) return;
+      payAdd({ sid:sid, gid:x.gid, amount:take, date:d,
+               kind:"ses", dueId:due.id, dueDate:due.date });
+      if(paidForDue(due.id) >= num(due.amount)-0.001){ due.paid=true; due.paidAt=d; }
+    }else{
+      if(paidForMonth(sid, x.gid, num(x.mi)) >= num(x.amount) - 0.001) return;
+      payAdd({ sid:sid, gid:x.gid, amount:take, mi:num(x.mi), kind:"month", date:d });
+    }
+    left -= take; done += take;
+  });
+  return done;
+}
+/* تسجيل واجب — نفس المنطق */
+function markHw(gid, d, sid, v){
+  setDayTask(gid, d, sid, v);
+}
 function setAtt(gid, d, sid, v){
   /* بيتسجّل في الطابور — عشان يتزامن لو النت كان واقع */
   setTimeout(function(){ queueOp("att", { gid:gid, date:d, sid:sid, v:v }); }, 0);
@@ -5615,9 +5678,27 @@ function sesModalHTML(gid, d){
       : (stt==="live"
         ? '<button class="btn ok sm" data-act="endSes" data-g="'+gid+'" data-d="'+d+'">■ إنهاء الحصة</button>'
         : '<button class="btn sm" data-act="startSes" data-g="'+gid+'" data-d="'+d+'">▶ ابدأ الحصة</button>'))+
-    '<button class="btn ghost sm" data-act="allPres" data-g="'+gid+'" data-d="'+d+'">✓ الكل حاضر</button>'+
+  '</div>';
+
+  /* ============================================================
+     الإجراءات الجماعية — كلها بتستخدم نفس دوال التسجيل الفردي
+     ============================================================ */
+  var canPay = rows.filter(function(r){ return !r.ex && (r.need+r.old) > 0; }).length;
+  var hwLeft = rows.filter(function(r){ return !dayTaskOf(gid,d,r.s.id); }).length;
+  h += '<div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:6px;margin-bottom:9px">'+
+    '<button class="btn ghost sm" data-act="allPres" data-g="'+gid+'" data-d="'+d+
+      '" style="flex:0 0 auto">✓ الكل حاضر</button>'+
+    '<button class="btn ghost sm" data-act="allAbs" data-g="'+gid+'" data-d="'+d+
+      '" style="flex:0 0 auto">✕ الكل غايب</button>'+
+    (canPay
+      ? '<button class="btn ok sm" data-act="allPay" data-g="'+gid+'" data-d="'+d+
+        '" style="flex:0 0 auto">₤ الكل دفع ('+ar(canPay)+')</button>' : '')+
+    '<button class="btn ghost sm" data-act="allHw" data-g="'+gid+'" data-d="'+d+
+      '" data-v="done" style="flex:0 0 auto">✎ الكل عمل الواجب</button>'+
     (abs? '<button class="btn sm" data-act="waAbsAll" data-g="'+gid+'" data-d="'+d+
-      '" style="background:var(--warn)">✆ بلّغ الغائبين ('+ar(abs)+')</button>':'')+
+      '" style="flex:0 0 auto;background:var(--warn)">✆ بلّغ الغائبين ('+ar(abs)+')</button>':'')+
+    '<button class="btn ghost sm" data-act="allReset" data-g="'+gid+'" data-d="'+d+
+      '" style="flex:0 0 auto;color:var(--bad)">↺ مسح الحضور والواجب</button>'+
   '</div>';
 
   /* بحث وفلترة */
@@ -7941,24 +8022,9 @@ var ACTS = {
   gAtt: function(el){
     var cur = attOf(el.dataset.g, el.dataset.d, el.dataset.s);
     var v = el.dataset.v;
-    setAtt(el.dataset.g, el.dataset.d, el.dataset.s, cur===v ? "" : v);
-    /* لو بقى حاضر وطريقته بالحصة، نسجّل مستحق الحصة فورًا */
-    var s = studentById(el.dataset.s), g = groupById(el.dataset.g);
-    var now = attOf(el.dataset.g, el.dataset.d, el.dataset.s);
-    if(s && g && payModeOf(s)==="ses" && billEligible(s, g, el.dataset.d)){
-      var has = (DB.sesDue||[]).some(function(x){
-        return x.sid===s.id && x.gid===g.id && x.date===el.dataset.d; });
-      if((now==="P"||now==="L") && !has){
-        DB.sesDue.push({ id:uid("sd"), sid:s.id, gid:g.id, date:el.dataset.d,
-                         amount:num(g.fee), paid:false });
-      }
-      /* شال الحضور؟ نشيل المستحق طالما مادفعش */
-      if(!now){
-        DB.sesDue = (DB.sesDue||[]).filter(function(x){
-          return !(x.sid===s.id && x.gid===g.id && x.date===el.dataset.d && !x.paid); });
-      }
-    }
-    saveSync();
+    /* نفس الدالة اللي بيستخدمها «الكل حاضر» */
+    markAtt(el.dataset.g, el.dataset.d, el.dataset.s, cur===v ? "" : v);
+    saveSync({ type:"att", data:{ gid:el.dataset.g, date:el.dataset.d, sid:el.dataset.s } });
     keepScroll(function(){
       if(UI.sesG && document.getElementById("mask").classList.contains("on"))
         $("#modal").innerHTML = sesModalHTML(UI.sesG, UI.sesD);
@@ -7968,6 +8034,9 @@ var ACTS = {
   gTask: function(el){
     var cur = dayTaskOf(el.dataset.g, el.dataset.d, el.dataset.s);
     var s = studentById(el.dataset.s);
+    /* بنحفظ مكان القائمة قبل ما نفتح نافذة الاختيار */
+    var box0 = document.querySelector("#modal .mb");
+    UI.sesY = box0 ? box0.scrollTop : 0;
     openModal(mh("واجب "+(s?s.name:""))+'<div class="mb">'+
       '<div class="note" style="margin-bottom:11px">حصة '+fmtD(el.dataset.d)+'</div>'+
       HW_STATES.map(function(x){
@@ -7981,12 +8050,26 @@ var ACTS = {
       '</div><div class="mf"><button class="btn ghost" data-act="close">إلغاء</button></div>');
   },
   gTaskSet: function(el){
-    setDayTask(el.dataset.g, el.dataset.d, el.dataset.s, el.dataset.v||"");
-    closeModal();
-    keepScroll(function(){
-      if(UI.sesG) modalSession(UI.sesG, UI.sesD);
-      render();
-    });
+    /* ============================================================
+       المشكلة اللي كانت: closeModal ثم modalSession كانت بتعمل
+       نافذة جديدة من الصفر، فالقائمة ترجع لأولها.
+       دلوقتي بنحفظ المكان، نرسم المحتوى جوه نفس النافذة،
+       ونرجّع المكان — فالمدرّس يفضل عند نفس الطالب.
+       ============================================================ */
+    var box = document.querySelector("#modal .mb");
+    var y = box ? box.scrollTop : 0;
+    markHw(el.dataset.g, el.dataset.d, el.dataset.s, el.dataset.v||"");
+    saveSync({ type:"hw", data:{ gid:el.dataset.g, date:el.dataset.d, sid:el.dataset.s } });
+    if(UI.sesG){
+      $("#modal").innerHTML = sesModalHTML(UI.sesG, UI.sesD);
+      requestAnimationFrame(function(){
+        var b2 = document.querySelector("#modal .mb");
+        if(b2) b2.scrollTop = UI.sesY || y;
+      });
+    }else{
+      closeModal();
+    }
+    render();
     toast(el.dataset.v? "اتسجّل الواجب" : "اتمسح");
   },
   gPay: function(el){
@@ -8166,6 +8249,8 @@ var ACTS = {
      وبيدعم الدفع الجزئي
      ============================================================ */
   payNow: function(el){
+    var box2 = document.querySelector("#modal .mb");
+    UI.sesY = box2 ? box2.scrollTop : 0;
     var s = studentById(el.dataset.s), g = groupById(el.dataset.g);
     if(!s || !g) return;
     if(isExempt(s)){ toast("الطالب معفي من الدفع"); return; }
@@ -8224,13 +8309,21 @@ var ACTS = {
       }
       left -= take; done += take;
     });
-    saveSync(); closeModal();
-    if(UI.sesG) modalSession(UI.sesG, UI.sesD);
+    saveSync({ type:"pay", data:{ sid:s.id, date:today() } });
+    if(UI.sesG){
+      $("#modal").innerHTML = sesModalHTML(UI.sesG, UI.sesD);
+      requestAnimationFrame(function(){
+        var b2 = document.querySelector("#modal .mb");
+        if(b2) b2.scrollTop = UI.sesY || 0;
+      });
+    }else closeModal();
     render();
     toast("اتسجّل "+money(done)+(left>0? " · فاضل "+money(left)+" زيادة":""));
   },
   /* ملاحظة على الطالب في الحصة */
   sesNote: function(el){
+    var box1 = document.querySelector("#modal .mb");
+    UI.sesY = box1 ? box1.scrollTop : 0;
     var s = studentById(el.dataset.s);
     var ses = sesOf(el.dataset.g, el.dataset.d) || {};
     var cur = (ses.notes||{})[el.dataset.s] || "";
@@ -8249,13 +8342,24 @@ var ACTS = {
     var t = val("sn_t").trim();
     if(t) DB.sessions[k].notes[el.dataset.s] = t;
     else delete DB.sessions[k].notes[el.dataset.s];
-    saveSync(); closeModal();
-    if(UI.sesG) modalSession(UI.sesG, UI.sesD);
+    saveSync();
+    if(UI.sesG){
+      $("#modal").innerHTML = sesModalHTML(UI.sesG, UI.sesD);
+      requestAnimationFrame(function(){
+        var b2 = document.querySelector("#modal .mb");
+        if(b2) b2.scrollTop = UI.sesY || 0;
+      });
+    }else closeModal();
     render(); toast(t? "اتحفظت الملاحظة":"اتمسحت");
   },
   sesNoteBack: function(){
-    closeModal();
-    if(UI.sesG) modalSession(UI.sesG, UI.sesD);
+    if(UI.sesG){
+      $("#modal").innerHTML = sesModalHTML(UI.sesG, UI.sesD);
+      requestAnimationFrame(function(){
+        var b2 = document.querySelector("#modal .mb");
+        if(b2) b2.scrollTop = UI.sesY || 0;
+      });
+    }else closeModal();
   },
   /* تبليغ كل الغائبين */
   waAbsAll: function(el){
@@ -8280,6 +8384,80 @@ var ACTS = {
     render();
   },
   allPres: function(el){ bulkAtt(el.dataset.g, el.dataset.d, "P"); },
+  /* ============================================================
+     الكل دفع — للمستحقين بس، والمعفي والمدفوع بيتجاهلوا
+     ============================================================ */
+  allPay: function(el){
+    var gid = el.dataset.g, d = el.dataset.d || today();
+    var st = groupStudents(gid);
+    var free = 0, none = 0, paid = 0, owing = [];
+    st.forEach(function(s){
+      if(isExemptOn(s, d)){ free++; return; }
+      var P = payStatus(s.id, d);
+      if(!P){ none++; return; }
+      if(P.total > 0) owing.push({ s:s, amount:P.total });
+      else if(P.paidToday > 0) paid++;
+      else none++;
+    });
+    if(!owing.length){
+      toast("مفيش طلاب عليهم مستحقات");
+      return;
+    }
+    var tot = owing.reduce(function(a,x){ return a+x.amount; }, 0);
+    if(!confirm("هيتسجّل الدفع لـ"+owing.length+" طالب بإجمالي "+money(tot)+"\n\n"+
+      (free?  free+" معفي — هيتجاهلوا\n" : "")+
+      (paid?  paid+" دفعوا خلاص\n" : "")+
+      (none?  none+" مفيش عليهم تحصيل\n" : "")+
+      "\nتكمّل؟")) return;
+    var done = 0, sum = 0;
+    owing.forEach(function(x){
+      var got = markPay(x.s.id, gid, d);       /* نفس دالة الدفع الفردي */
+      if(got){ done++; sum += got; }
+    });
+    saveSync({ type:"pay", data:{ gid:gid, date:d, bulk:1 } });
+    keepScroll(function(){
+      if(UI.sesG && document.getElementById("mask").classList.contains("on"))
+        $("#modal").innerHTML = sesModalHTML(UI.sesG, UI.sesD);
+      render();
+    });
+    toast("اتسجّل "+money(sum)+" لـ"+ar(done)+" طالب");
+  },
+  /* الكل عمل الواجب */
+  allHw: function(el){
+    var gid = el.dataset.g, d = el.dataset.d || today();
+    var v = el.dataset.v || "done";
+    var st = groupStudents(gid);
+    if(!st.length) return;
+    var S = HW_STATES.filter(function(x){ return x.id===v; })[0] || {};
+    if(!confirm("تسجيل «"+(S.n||v)+"» لكل الطلاب ("+st.length+")؟\n\n"+
+      "تقدر تعدّل اللي مختلف بعدين واحد واحد.")) return;
+    st.forEach(function(s){ markHw(gid, d, s.id, v); });
+    saveSync({ type:"hw", data:{ gid:gid, date:d, bulk:1 } });
+    keepScroll(function(){
+      if(UI.sesG && document.getElementById("mask").classList.contains("on"))
+        $("#modal").innerHTML = sesModalHTML(UI.sesG, UI.sesD);
+      render();
+    });
+    toast("اتسجّل لـ"+ar(st.length)+" طالب");
+  },
+  /* مسح الحضور والواجب — الدفعات مبتتلمسش */
+  allReset: function(el){
+    var gid = el.dataset.g, d = el.dataset.d || today();
+    if(!confirm("مسح الحضور والواجب لكل الطلاب في الحصة دي؟\n\n"+
+      "الدفعات المسجّلة **مش** هتتلمس.")) return;
+    var st = groupStudents(gid);
+    st.forEach(function(s){
+      markAtt(gid, d, s.id, "");
+      markHw(gid, d, s.id, "");
+    });
+    saveSync({ type:"att", data:{ gid:gid, date:d, bulk:1 } });
+    keepScroll(function(){
+      if(UI.sesG && document.getElementById("mask").classList.contains("on"))
+        $("#modal").innerHTML = sesModalHTML(UI.sesG, UI.sesD);
+      render();
+    });
+    toast("اتمسح الحضور والواجب");
+  },
   allAbs:  function(el){ 
     if(!confirm("تسجيل كل الطلاب غايبين في الحصة دي؟")) return;
     bulkAtt(el.dataset.g, el.dataset.d, "A"); },
@@ -8359,6 +8537,20 @@ var ACTS = {
   }
 };
 function bulkAtt(gid, d, v){
+  /* بتستخدم markAtt — نفس منطق التسجيل الفردي بالظبط */
+  var st0 = groupStudents(gid);
+  if(!st0.length){ toast("مفيش طلاب"); return; }
+  st0.forEach(function(s){ markAtt(gid, d, s.id, v); });
+  saveSync({ type:"att", data:{ gid:gid, date:d, bulk:1 } });
+  keepScroll(function(){
+    if(UI.sesG && document.getElementById("mask").classList.contains("on"))
+      $("#modal").innerHTML = sesModalHTML(UI.sesG, UI.sesD);
+    render();
+  });
+  toast(v==="P" ? "الكل حاضر ✓" : "الكل غايب");
+  return;
+}
+function bulkAttOld(gid, d, v){
   groupStudents(gid).forEach(function(s){ setAtt(gid, d, s.id, v); });
   modalSession(gid, d); render();
   toast(v==="P"? "الكل حاضر" : "الكل غايب");
