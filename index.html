@@ -458,7 +458,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "7.2";
+var APP_VER = "7.4";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -512,6 +512,7 @@ function normalizeDB(){
   if(!DB.sessions || typeof DB.sessions!=="object" || Array.isArray(DB.sessions)) DB.sessions = {};
   if(!DB.lock || typeof DB.lock!=="object") DB.lock = { on:false, pin:"", bio:false };
   if(!DB.seq) DB.seq = 1;
+  if(typeof DB.rev!=="number") DB.rev = 0;
   if(typeof DB.curYear!=="string") DB.curYear = "";
   /* الحقول اللي جوه العناصر ممكن تكون ناقصة كمان */
   DB.exams.forEach(function(e){ if(!Array.isArray(e.qs)) e.qs=[]; if(!e.marks) e.marks={}; });
@@ -533,7 +534,51 @@ function load(){
   migratePays();            /* توحيد سجل الدفعات */
   migrateBillDates();       /* تواريخ بداية الاحتساب */
 }
-function save(){ try{ localStorage.setItem(KEY, JSON.stringify(DB)); }catch(e){ toast("مساحة التخزين ممتلئة"); } }
+/* الكتابة الخام — من غير ما تعلّم إن فيه تعديل محلي.
+   بتتستخدم لما البيانات جاية من السحابة أصلًا. */
+function saveRaw(){
+  try{ localStorage.setItem(KEY, JSON.stringify(DB)); }
+  catch(e){ toast("مساحة التخزين ممتلئة"); }
+}
+var BOOTING = true;      /* بيتقفل بعد ما البرنامج يستقر */
+var QUIET   = 0;         /* >0 يعني ترتيبات داخلية مش تعديل مستخدم */
+
+function save(){
+  DB.rev = num(DB.rev,0) + 1;
+  DB.at  = Date.now();
+  DB.dev = DEV_ID;
+  saveRaw();
+  if(BOOTING || QUIET > 0) return;
+  try{ SYNCM.dirty = true; smSave(); }catch(e){}
+  scheduleUp();
+}
+
+/* ============================================================
+   الرفع التلقائي
+   كان مربوط بـ saveSync() بس — و**١٥ مكان** في البرنامج
+   بيستدعوا save() على طول من غير مزامنة (منهم حذف مجموعة
+   وحذف طالب). التعديلات دي كانت بتفضل محلية وخلاص.
+   دلوقتي أي حفظ بيجدول رفع.
+   ============================================================ */
+function scheduleUp(){
+  if(!fbOn() || FB.role!=="teacher") return;
+  if(!navigator.onLine){ UI.qPending = true; return; }
+  clearTimeout(window._sy);
+  window._sy = setTimeout(function(){ try{ syncUp(); }catch(e){} }, 1200);
+}
+
+/* بصمة البيانات — من غير أرقام النسخ، عشان نقارن المحتوى نفسه */
+function dbPrint(d){
+  if(!d) return null;
+  try{
+    var c = {};
+    Object.keys(d).forEach(function(k){
+      if(k==="rev" || k==="at" || k==="dev") return;
+      c[k] = d[k];
+    });
+    return JSON.stringify(c);
+  }catch(e){ return null; }
+}
 function uid(p){ return (p||"i") + (DB.seq++) + Math.random().toString(36).slice(2,6); }
 
 /* ============================================================
@@ -619,7 +664,254 @@ function monthKey(mi){ return "m"+mi; }
    • النسخة العامة في /pub: مواعيد المجموعات وأسماء الطلاب
      والتعليمات — عشان الطالب يشوفها بكود مجموعته
    ============================================================ */
-var SYNC = { on:false, at:0, busy:false };
+var SYNC = { on:false, at:0, busy:false, multi:null };
+
+/* ============================================================
+   هوية الجهاز
+   من غيرها مفيش طريقة نعرف بيها إن جهازين بيكتبوا على نفس
+   البيانات. الـid بيتولد مرة واحدة وبيفضل مع المتصفح.
+   ============================================================ */
+var DEV_ID = (function(){
+  try{
+    var d = localStorage.getItem(KEY+"_dev");
+    if(!d){ d = "d"+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+            localStorage.setItem(KEY+"_dev", d); }
+    return d;
+  }catch(e){ return "d0"; }
+})();
+var DEV_NAME = (function(){
+  var u = navigator.userAgent||"";
+  if(/iPhone|iPod/.test(u)) return "آيفون";
+  if(/iPad/.test(u))        return "آيباد";
+  if(/Android/.test(u))     return /Mobile/.test(u) ? "موبايل أندرويد" : "تابلت أندرويد";
+  if(/Windows/.test(u))     return "كمبيوتر ويندوز";
+  if(/Mac OS X/.test(u))    return "ماك";
+  return "جهاز";
+})();
+
+/* ============================================================
+   حالة المزامنة المستمرة
+   seen     = رقم نسخة السحابة اللي الجهاز ده متفق معاها
+   dirty    = فيه تعديلات محلية لسه ما اترفعتش
+   conflict = السحابة اتغيّرت من جهاز تاني وإحنا عندنا تعديلات
+
+   الفكرة كلها: **ممنوع أي جهاز يكتب فوق السحابة إلا لو
+   السحابة لسه على النسخة اللي هو شافها**. لو حد تاني كتب
+   في الوسط، الكتابة بتترفض ويتسأل المستخدم — مش بتعدّي بصمت.
+   ============================================================ */
+var SYNCM = { seen:0, dirty:false, conflict:false };
+(function(){
+  try{
+    var v = JSON.parse(localStorage.getItem(KEY+"_syncm")||"null");
+    if(v && typeof v.seen==="number") SYNCM = { seen:v.seen, dirty:!!v.dirty, conflict:!!v.conflict };
+  }catch(e){}
+})();
+function smSave(){
+  try{ localStorage.setItem(KEY+"_syncm", JSON.stringify(SYNCM)); }catch(e){}
+}
+
+/* نسخة السحابة المتعارضة — بتتحفظ مؤقتًا لحد ما المستخدم يقرر */
+var CONF = { cloud:null, rev:0 };
+
+/* ============================================================
+   النسخ الاحتياطية المحلية الدوّارة
+   آخر ١٠ نسخ على الجهاز. بتتاخد قبل أي استبدال للبيانات
+   (سحب من السحابة · استرجاع ملف) وكل ٦ ساعات استخدام.
+   ده اللي بيخلي أي غلطة قابلة للرجوع.
+   ============================================================ */
+/* ============================================================
+   النسخ الاحتياطية
+
+   ليه IndexedDB مش localStorage؟
+   صور أسئلة الامتحانات بتتخزّن جوه البيانات نفسها، والصورة
+   لوحدها ممكن توصل ٤٠٠ كيلو. يعني نسخة واحدة ممكن تعدّي حد
+   الـ٥ ميجا بتاع localStorage. IndexedDB بيدّي مساحة أكبر
+   بكتير، فينفع نحتفظ بأيام مش بساعات.
+
+   الفهرس (بيانات مختصرة) بيفضل في localStorage عشان القراءة
+   تفضل فورية، والمحتوى نفسه في IndexedDB.
+   ============================================================ */
+var IDB = { db:null, ok:(typeof indexedDB!=="undefined") };
+function idbOpen(){
+  return new Promise(function(res, rej){
+    if(!IDB.ok) return rej(new Error("مفيش IndexedDB"));
+    if(IDB.db) return res(IDB.db);
+    var r;
+    try{ r = indexedDB.open("drosy_baks", 1); }catch(e){ return rej(e); }
+    r.onupgradeneeded = function(e){
+      var d = e.target.result;
+      if(!d.objectStoreNames.contains("baks")) d.createObjectStore("baks", { keyPath:"id" });
+    };
+    r.onsuccess = function(){ IDB.db = r.result; res(IDB.db); };
+    r.onerror   = function(){ rej(r.error || new Error("فشل الفتح")); };
+  });
+}
+function idbPut(id, text){
+  return idbOpen().then(function(d){
+    return new Promise(function(res, rej){
+      var t = d.transaction("baks","readwrite");
+      t.objectStore("baks").put({ id:id, text:text });
+      t.oncomplete = function(){ res(true); };
+      t.onerror    = function(){ rej(t.error); };
+    });
+  });
+}
+function idbGet(id){
+  return idbOpen().then(function(d){
+    return new Promise(function(res, rej){
+      var t = d.transaction("baks","readonly");
+      var q = t.objectStore("baks").get(id);
+      q.onsuccess = function(){ res(q.result ? q.result.text : null); };
+      q.onerror   = function(){ rej(q.error); };
+    });
+  });
+}
+function idbDel(id){
+  return idbOpen().then(function(d){
+    return new Promise(function(res){
+      var t = d.transaction("baks","readwrite");
+      t.objectStore("baks").delete(id);
+      t.oncomplete = function(){ res(true); };
+      t.onerror    = function(){ res(false); };
+    });
+  }).catch(function(){ return false; });
+}
+
+function bakList(){
+  try{ return JSON.parse(localStorage.getItem(KEY+"_baks")||"[]"); }
+  catch(e){ return []; }
+}
+function bakIndexSave(l){
+  try{ localStorage.setItem(KEY+"_baks", JSON.stringify(l)); }catch(e){}
+}
+function bakDrop(rec){
+  if(rec.store==="idb") idbDel(rec.id);
+  else { try{ localStorage.removeItem(KEY+"_bak_"+rec.id); }catch(e){} }
+}
+
+/* ============================================================
+   سلّم الاحتفاظ
+
+   «آخر ١٠ نسخ» مش كفاية: يوم شغل واحد فيه سحب كتير ممكن
+   يملا العشرة كلهم بنسخ من نفس الساعة، وتبقى أقدم نسخة عندك
+   عمرها ساعتين. فالاحتفاظ بقى بالزمن مش بالعدد:
+
+   • كل نسخ آخر ١٢ ساعة (لحد ١٢ نسخة)
+   • أحدث نسخة من كل يوم في آخر ١٤ يوم
+   • النسخ اليدوية بتفضل دايمًا (لحد ٥)
+
+   يعني تقدر ترجع لأي يوم في الأسبوعين اللي فاتوا.
+   ============================================================ */
+var BAK_RECENT_H  = 12;
+var BAK_RECENT_N  = 12;
+var BAK_DAYS      = 14;
+var BAK_MANUAL_N  = 5;
+
+function bakPrune(){
+  var l = bakList();
+  if(!l.length) return l;
+  l.sort(function(a,b){ return num(a.at)-num(b.at); });
+  var now = Date.now(), keep = {};
+
+  /* ١) الحديثة */
+  var recent = l.filter(function(b){ return now - num(b.at) < BAK_RECENT_H*3600*1000; });
+  recent.slice(-BAK_RECENT_N).forEach(function(b){ keep[b.id] = 1; });
+
+  /* ٢) أحدث نسخة في كل يوم */
+  var byDay = {};
+  l.forEach(function(b){
+    if(now - num(b.at) > BAK_DAYS*86400000) return;
+    var d = new Date(num(b.at));
+    var k = d.getFullYear()+"-"+(d.getMonth()+1)+"-"+d.getDate();
+    if(!byDay[k] || num(b.at) > num(byDay[k].at)) byDay[k] = b;
+  });
+  Object.keys(byDay).forEach(function(k){ keep[byDay[k].id] = 1; });
+
+  /* ٣) اليدوية */
+  l.filter(function(b){ return b.manual; }).slice(-BAK_MANUAL_N)
+   .forEach(function(b){ keep[b.id] = 1; });
+
+  var out = [], gone = [];
+  l.forEach(function(b){ if(keep[b.id]) out.push(b); else gone.push(b); });
+  gone.forEach(bakDrop);
+  if(gone.length) bakIndexSave(out);
+  return out;
+}
+
+function bakSave(tag, src, manual){
+  var d = src || DB;
+  if(!d || !d.meta) return false;
+  var payload;
+  /* التحويل لنص بيحصل **فورًا** — عشان لو البيانات اتغيّرت
+     بعد السطر ده على طول، النسخة تبقى اتصوّرت قبل التغيير */
+  try{ payload = JSON.stringify(d); }catch(e){ return false; }
+
+  var l1 = bakList();
+  var at = Date.now();
+  if(l1.length){
+    var top = 0;
+    l1.forEach(function(b){ if(num(b.at) > top) top = num(b.at); });
+    if(at <= top) at = top + 1;          /* ترتيب مضمون */
+  }
+  var id  = "b"+at.toString(36)+Math.random().toString(36).slice(2,5);
+  var rec = { id:id, at:at, tag:tag||"", dev:DEV_NAME, size:payload.length,
+              manual:!!manual, store: IDB.ok ? "idb" : "ls",
+              g:(d.groups||[]).length, s:(d.students||[]).length,
+              b:(d.bookings||[]).length, p:(d.pays||[]).length };
+
+  if(IDB.ok){
+    /* الفهرس الأول وبالتزامن — عشان نسختين في نفس اللحظة
+       ما يمسحوش بعض */
+    var l0 = bakList(); l0.push(rec); bakIndexSave(l0);
+    idbPut(id, payload).then(function(){
+      bakPrune();
+    }).catch(function(){
+      /* IndexedDB وقع — نشيل السجل ونرجع لـ localStorage */
+      bakIndexSave(bakList().filter(function(x){ return x.id!==id; }));
+      IDB.ok = false; rec.store = "ls"; bakSaveLS(rec, payload);
+    });
+    return true;
+  }
+  return bakSaveLS(rec, payload);
+}
+
+/* الاحتياطي: localStorage بمساحة ضيقة — بنشيل الأقدم لو ضاقت */
+function bakSaveLS(rec, payload){
+  var l = bakList();
+  for(var t=0; t<14; t++){
+    try{
+      localStorage.setItem(KEY+"_bak_"+rec.id, payload);
+      l.push(rec); bakIndexSave(l); bakPrune();
+      return true;
+    }catch(e){
+      var old = l.shift();
+      if(!old) return false;
+      bakDrop(old); bakIndexSave(l);
+    }
+  }
+  return false;
+}
+
+/* بيرجّع Promise — المحتوى ممكن يكون في IndexedDB */
+function bakGet(id){
+  var rec = bakList().filter(function(b){ return b.id===id; })[0];
+  var fromLS = function(){
+    try{ return JSON.parse(localStorage.getItem(KEY+"_bak_"+id)||"null"); }
+    catch(e){ return null; }
+  };
+  if(rec && rec.store==="ls") return Promise.resolve(fromLS());
+  return idbGet(id).then(function(t){
+    if(t){ try{ return JSON.parse(t); }catch(e){ return null; } }
+    return fromLS();                 /* نسخ قديمة من قبل الترقية */
+  }).catch(function(){ return fromLS(); });
+}
+
+/* نسخة دورية — كل ٤ ساعات عشان يبقى فيه تغطية كويسة لكل يوم */
+function bakTick(){
+  var l = bakList(), last = l.length ? num(l[l.length-1].at) : 0;
+  if(Date.now() - last > 4*3600*1000) bakSave("نسخة دورية");
+  bakPrune();
+}
 
 /* ============================================================
    النسخة العامة
@@ -735,9 +1027,19 @@ function pubSnapshot(){
     at: Date.now()
   };
 }
-function syncUp(){
-  if(!fbOn() || FB.role!=="teacher") return Promise.resolve(false);
-  SYNC.busy = true;
+/* ============================================================
+   الرفع — بقفل تعارض
+
+   الباج اللي كان: الرفع كان `fbSet("private/db", DB)` على طول.
+   أي جهاز يرفع في أي وقت بيدهس اللي في السحابة، حتى لو نسخته
+   أقدم. جهازين = ضياع مؤكد.
+
+   دلوقتي: قبل ما نكتب أي حاجة، بنعمل **معاملة** على رقم النسخة
+   في السحابة. الكتابة بتعدّي بشرط واحد: إن رقم السحابة لسه هو
+   الرقم اللي الجهاز ده شافه آخر مرة. لو حد تاني كتب في الوسط،
+   المعاملة بتترفض والبيانات ما بتتلمسش — ويتفتح للمستخدم قرار.
+   ============================================================ */
+function pushPayload(){
   var snap = pubSnapshot();
   return Promise.all([
     fbSet("private/db", DB),
@@ -745,20 +1047,135 @@ function syncUp(){
     fbSet("pub/groups", snap.groups),
     fbSet("pub/students", snap.students),
     fbSet("pub/mine", snap.mine || {})     /* بيانات كل طالب لبوابته */
-  ]).then(function(){
-    SYNC.busy=false; SYNC.on=true; SYNC.at=Date.now();
-    try{ localStorage.setItem(KEY+"_syncAt", String(SYNC.at)); }catch(e){}
-    return true;
-  }).catch(function(e){ SYNC.busy=false; FB.err=e.message; return false; });
+  ]);
 }
-function syncDown(){
+function syncUp(force){
   if(!fbOn() || FB.role!=="teacher") return Promise.resolve(false);
-  return fbGet("private/db").then(function(v){
-    if(!v || !v.meta) return false;
+  if(SYNC.busy) return Promise.resolve(false);
+  /* مفيش تعديل معلّق ومتزامنين أصلًا → مفيش داعي نكتب حاجة.
+     ده بيمنع رفعات مكرّرة بتستهلك من حصة السحابة على الفاضي. */
+  if(!force && !SYNCM.dirty && SYNCM.seen > 0) return Promise.resolve(true);
+  SYNC.busy = true;
+  var mySeen = SYNCM.seen;
+  return withTimeout(
+    FB.db.ref("private/meta").transaction(function(cur){
+      var cRev = (cur && typeof cur.rev==="number") ? cur.rev : null;
+      /* السحابة اتغيّرت من جهاز تاني بعد آخر مرة شفناها → ارفض */
+      if(cRev!==null && cRev!==mySeen && !force) return;   /* undefined = إلغاء */
+      var base = (cRev===null) ? mySeen : cRev;
+      return { rev: base+1, dev: DEV_ID, devName: DEV_NAME, at: Date.now() };
+    }), 12000, "قفل المزامنة"
+  ).then(function(res){
+    if(!res || !res.committed){
+      SYNC.busy = false;
+      /* المعاملة اترفضت — بس ممكن يكون نفس المحتوى بالظبط */
+      return fbGet("private/db").then(function(v){
+        if(v && v.meta && dbPrint(v) === dbPrint(DB)){
+          var cur = res && res.snapshot ? (res.snapshot.val()||{}) : {};
+          SYNCM.seen = num(cur.rev, SYNCM.seen);
+          SYNCM.dirty = false; SYNCM.conflict = false; smSave();
+          return true;                  /* اتفقنا — مفيش حاجة تتعمل */
+        }
+        CONF.cloud = v; CONF.rev = 0;
+        SYNCM.conflict = true; smSave();
+        onConflict();
+        return "conflict";
+      }).catch(function(){ return false; });
+    }
+    var v = res.snapshot.val() || {};
+    var newRev = num(v.rev, mySeen+1);
+    return pushPayload().then(function(){
+      SYNCM.seen = newRev; SYNCM.dirty = false; SYNCM.conflict = false; smSave();
+      SYNC.busy=false; SYNC.on=true; SYNC.at=Date.now();
+      try{ localStorage.setItem(KEY+"_syncAt", String(SYNC.at)); }catch(e){}
+      try{ cloudBak(newRev); }catch(e){}
+      return true;
+    }).catch(function(e){
+      /* رقم النسخة اتحجز بس الكتابة فشلت — بنفضل «متسخين»
+         عشان نعيد المحاولة، والمحاولة الجاية هتتعامل كتعارض
+         وتسأل المستخدم بدل ما تمسح حاجة بصمت. */
+      SYNC.busy=false; FB.err=e.message; SYNCM.dirty=true; smSave();
+      return false;
+    });
+  }).catch(function(e){ SYNC.busy=false; FB.err=(e&&e.message)||""; return false; });
+}
+
+/* نسخة احتياطية في السحابة — آخر ٣ نسخ، مرة كل ٦ ساعات */
+function cloudBak(rev){
+  if(!fbOn() || FB.role!=="teacher") return;
+  var last = 0;
+  try{ last = num(localStorage.getItem(KEY+"_cbakAt"),0); }catch(e){}
+  if(Date.now() - last < 20*3600*1000) return;   /* نسخة سحابية في اليوم */
+  var sz = 0;
+  try{ sz = JSON.stringify(DB).length; }catch(e){ return; }
+  if(sz > 2500000) return;                     /* كبيرة أوي — منعدّيها */
+  try{ localStorage.setItem(KEY+"_cbakAt", String(Date.now())); }catch(e){}
+  fbSet("private/bak/r"+rev, { at:Date.now(), dev:DEV_NAME, rev:rev, db:DB })
+    .then(function(){ return fbGet("private/bak"); })
+    .then(function(v){
+      var ks = Object.keys(v||{}).sort(function(a,b){ return num(v[a].at)-num(v[b].at); });
+      while(ks.length > 7){                        /* أسبوع في السحابة */
+        var k = ks.shift();
+        try{ FB.db.ref("private/bak/"+k).remove(); }catch(e){}
+      }
+    }).catch(function(){});
+}
+/* ============================================================
+   السحب — بحماية
+
+   الباج اللي كان: `DB = v` على طول. أي نسخة في السحابة بتحل
+   محل اللي على الجهاز، حتى لو الجهاز فيه شغل لسه ما اترفعش.
+   وكان أخطر من كده: لو السحب فشل (نت وحش أو مهلة) الدالة
+   بترجّع false، والداخل بيرفع نسخته القديمة فوق الصح.
+
+   دلوقتي بترجّع حالة واضحة، والاستبدال بيحصل بشرطين:
+   مفيش تعديلات محلية معلّقة، وبنسخة احتياطية قبله.
+   ============================================================ */
+function syncDown(){
+  if(!fbOn() || FB.role!=="teacher") return Promise.resolve("off");
+  return Promise.all([
+    fbGet("private/meta").catch(function(){ return null; }),
+    fbGet("private/db")
+  ]).then(function(r){
+    var meta = r[0], v = r[1];
+    if(!v || !v.meta) return "empty";                 /* السحابة فاضية فعلًا */
+    var cRev = (meta && typeof meta.rev==="number") ? meta.rev : -1;
+    if(cRev >= 0 && cRev === SYNCM.seen) return "same";   /* مفيش جديد */
+
+    /* ★ قبل ما نقول «تعارض»: هل البيانات مختلفة أصلًا؟
+       أول فتحة بعد التحديث السحابة بتبقى من غير رقم نسخة،
+       فالأرقام بتختلف والمحتوى واحد. مقارنة المحتوى بتمنع
+       نافذة التعارض الوهمية دي. */
+    if(dbPrint(v) === dbPrint(DB)){
+      SYNCM.seen = (cRev>=0? cRev : 0);
+      SYNCM.dirty = false; SYNCM.conflict = false; smSave();
+      return "same";
+    }
+
+    if(SYNCM.dirty){
+      /* عندي شغل محلي + السحابة اتغيّرت فعلًا = تعارض حقيقي */
+      CONF.cloud = v; CONF.rev = cRev;
+      SYNCM.conflict = true; smSave();
+      onConflict();
+      return "conflict";
+    }
+    bakSave("قبل سحب من السحابة");
+    QUIET++;                            /* اللي جاي ترتيب داخلي مش تعديل */
     DB = v;
     normalizeDB();                      /* لازم قبل أي رسم — ده كان سبب العطل */
-    ensureCodes(); save(); return true;
-  }).catch(function(){ return false; });
+    try{ ensureCodes(); }catch(e){}     /* بيستدعي save() جواه */
+    saveRaw();                          /* خام — دي بيانات السحابة مش تعديل */
+    QUIET--;
+    SYNCM.seen = (cRev>=0? cRev : 0); SYNCM.dirty=false; SYNCM.conflict=false; smSave();
+    return "pulled";
+  }).catch(function(){ return "err"; });
+}
+
+/* لما يحصل تعارض — بنفتح القرار للمستخدم بدل ما نقرر إحنا */
+function onConflict(){
+  if(UI._confOpen) return;
+  UI._confOpen = true;
+  try{ modalConflict(); }catch(e){ UI._confOpen=false; }
 }
 /* ============================================================
    طابور المزامنة — العمل من غير إنترنت
@@ -857,12 +1274,7 @@ function saveSync(op){
   window._syncT = setTimeout(function(){
     if(queueCount()) autoSync("save");
   }, 2500);
-  if(fbOn() && FB.role==="teacher"){
-    clearTimeout(window._sy);
-    window._sy = setTimeout(function(){
-      try{ syncUp(); }catch(e){}
-    }, 900);
-  }
+  /* الرفع نفسه بقى جوه save() — بيغطي كل الحفظ مش بعضه */
 }
 
 /* ---------- بحث وربط ---------- */
@@ -2560,6 +2972,7 @@ function closeSide(){
   document.getElementById("scrim").classList.remove("on");
 }
 function render(){
+  try{ warnBar(); }catch(e0){}
   try{ _render(); }
   catch(err){
     /* ============================================================
@@ -2889,7 +3302,10 @@ function viewGroups(){
   h += '<div class="card"><div class="bd flush">';
   DB.groups.slice().sort(function(a,b){ return normAr(a.name)<normAr(b.name)?-1:1; }).forEach(function(g){
     var st = groupStudents(g.id);
-    var dayTxt = (g.days||[]).map(function(d){ return DAYS[d].slice(0,3); }).join("·") || "مفيش مواعيد";
+    /* يوم بقيمة غريبة (بيانات قديمة أو راجعة من السحابة) كان
+       بيوقّع تبويب المجموعات كله. دلوقتي بيتخطّى بس. */
+    var dayTxt = (g.days||[]).map(function(d){ return DAYS[d] ? DAYS[d].slice(0,3) : ""; })
+                   .filter(Boolean).join("·") || "مفيش مواعيد";
     h += '<button class="item" data-act="openGroup" data-g="'+g.id+'">'+
       '<span class="av">'+esc(initials(g.name))+'</span>'+
       '<span class="tx"><b>'+esc(g.name)+'</b><small>'+
@@ -4432,6 +4848,7 @@ function viewReports(){
     '<div class="row" style="margin-top:10px">'+
     '<button class="btn ghost sm" data-act="backup">↓ نسخة احتياطية</button>'+
     '<button class="btn ghost sm" data-act="restore">↑ استرجاع</button>'+
+    '<button class="btn ghost sm" data-act="baks">◷ النسخ التلقائية</button>'+
     '<button class="btn ghost sm" data-act="wipe" style="color:var(--bad)">مسح الكل</button>'+
     '</div></div></div>';
   return h;
@@ -8689,6 +9106,60 @@ var ACTS = {
   exportCsv: exportCsv,
   backup: backup,
   restore: restore,
+  baks: function(){ modalBaks(); },
+  bakNow: function(){
+    var ok = bakSave("يدوي", null, true);
+    toast(ok? "اتاخدت نسخة ✓" : "المساحة مش كفاية");
+    setTimeout(modalBaks, 250);
+  },
+  bakGo: function(el){
+    if(!confirm("استرجاع النسخة دي؟\n\nالبيانات الحالية هتتحفظ نسخة احتياطية الأول.")) return;
+    var id = el.dataset.id;
+    toast("بنجيب النسخة…");
+    bakGet(id).then(function(d){
+      if(!d || !d.meta){ toast("النسخة مش موجودة"); return; }
+      bakSave("قبل استرجاع نسخة");
+      DB = d; normalizeDB(); ensureCodes(); save();
+      UI = { tab:"home", sub:null, q:"", gid:"", date:"" };
+      closeModal(); render(); toast("اترجّعت النسخة — راجعها وبعدين ارفع");
+    }).catch(function(){ toast("مقدرناش نقرا النسخة"); });
+  },
+  warnHide: function(){ UI.warnHid = true; render(); },
+  forensic: function(){ modalForensic(); },
+  qExport: function(){
+    var q = "[]";
+    try{ q = localStorage.getItem(KEY+"_q")||"[]"; }catch(e){}
+    var b = new Blob([q], { type:"application/json" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(b);
+    a.download = "drosy-queue-"+today()+".json";
+    a.click();
+    setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+  },
+  conf: function(){ modalConflict(); },
+  confPull: function(){
+    UI._confOpen = false;
+    bakSave("نسخة الجهاز قبل اعتماد السحابة");
+    SYNCM.dirty = false; SYNCM.conflict = false; smSave();
+    closeModal();
+    syncDown().then(function(st){
+      render();
+      toast(st==="pulled" ? "اتعتمدت نسخة السحابة ✓" : "مقدرناش نسحب — جرّب تاني");
+    });
+  },
+  confPush: function(){
+    if(!confirm("نسخة الجهاز ده هي اللي هتكمّل؟\n\nنسخة السحابة هتتحفظ عندك نسخة احتياطية الأول.")) return;
+    UI._confOpen = false;
+    fbGet("private/db").then(function(v){
+      if(v && v.meta) bakSave("نسخة السحابة قبل استبدالها", v);
+    }).catch(function(){}).then(function(){
+      closeModal();
+      return syncUp(true);
+    }).then(function(ok){
+      SYNCM.conflict = !ok; smSave(); render();
+      toast(ok===true ? "اترفعت نسخة الجهاز ✓" : "الرفع فشل — البيانات محفوظة عندك");
+    });
+  },
   wipe: function(){
     if(!confirm("مسح كل البيانات نهائيًا؟\n\nالمجموعات والطلاب والدفعات والحضور. مفيش تراجع.")) return;
     if(!confirm("متأكد؟ خد نسخة احتياطية الأول لو مش متأكد.")) return;
@@ -9153,10 +9624,16 @@ function gAuth(){
     try{ localStorage.setItem(KEY+"_sess", JSON.stringify({r:"teacher"})); }catch(e){}
     GATE.busy=false;
     render();
-    return syncDown().then(function(got){
-      if(!got) syncUp();
+    return syncDown().then(function(st){
+      /* ⚠ الفرق ده هو أهم سطر في الإصلاح كله:
+         الكود القديم كان بيرفع نسخته المحلية لو السحب «مارجعش
+         حاجة» — واللي كان بيشمل حالة **فشل الاتصال**. يعني نت
+         وحش لثانية = نسختك القديمة تدهس شغل السحابة كله.
+         دلوقتي الرفع بيحصل بس لو السحابة فاضية فعلًا. */
+      if(st==="empty") syncUp();
+      beatStart();
       UI.tab="home"; UI.sub=null; render();
-      toast(got? "أهلًا — البيانات اتحمّلت" : "أهلًا " + (DB.meta.name||""));
+      toast(st==="pulled" ? "أهلًا — البيانات اتحمّلت" : "أهلًا " + (DB.meta.name||""));
     });
   }).catch(function(e){
     var m = String((e&&e.code)||"");
@@ -9398,6 +9875,193 @@ function modalChPw(){
       '<input type="password" id="cp_new2" style="direction:ltr"></label>'+
     '</div>'+mf("غيّرها","chPwGo"));
 }
+/* ============================================================
+   نبضة الجهاز
+   كل جهاز بيسجّل «أنا شغال دلوقتي». لو لقينا جهاز تاني نبض
+   في آخر ٤ دقايق، بنحذّر — لأن ده بالظبط الموقف اللي بيولّد
+   التعارض. التحذير أرخص كتير من اكتشاف الضياع بعد يوم.
+   ============================================================ */
+function beat(){
+  if(!fbOn() || FB.role!=="teacher") return;
+  fbSet("private/live/"+DEV_ID, { at:Date.now(), n:DEV_NAME }).catch(function(){});
+  fbGet("private/live").then(function(v){
+    var now = Date.now(), other = null;
+    Object.keys(v||{}).forEach(function(k){
+      if(k===DEV_ID) return;
+      var r = v[k]; if(!r) return;
+      if(now - num(r.at,0) < 240000) other = r;
+      else { try{ FB.db.ref("private/live/"+k).remove(); }catch(e){} }
+    });
+    var was = !!SYNC.multi;
+    SYNC.multi = other;
+    if(!!other !== was) render();
+  }).catch(function(){});
+}
+var _beatT = null;
+function beatStart(){
+  if(_beatT) return;
+  beat();
+  _beatT = setInterval(beat, 60000);
+}
+
+/* شريط التحذير — بيتحط فوق كل حاجة عشان ما يتفوتش */
+function warnBar(){
+  var el = document.getElementById("warnBar");
+  var show = FB.role==="teacher" && (SYNC.multi || SYNCM.conflict) && !UI.warnHid;
+  if(!show){ if(el) el.remove(); return; }
+  if(!el){
+    el = document.createElement("div");
+    el.id = "warnBar";
+    el.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:200;"+
+      "background:var(--bad,#c0392b);color:#fff;padding:9px 12px;font-size:13px;"+
+      "display:flex;gap:10px;align-items:center;justify-content:space-between;"+
+      "box-shadow:0 2px 10px rgba(0,0,0,.25)";
+    document.body.appendChild(el);
+  }
+  var msg = SYNCM.conflict
+    ? "<b>تعارض في البيانات</b> — فيه نسخة أحدث في السحابة"
+    : "<b>البرنامج مفتوح على جهاز تاني</b> ("+esc((SYNC.multi&&SYNC.multi.n)||"جهاز")+") — اشتغل على واحد بس";
+  el.innerHTML = '<span>'+msg+'</span>'+
+    '<span style="display:flex;gap:6px;flex:0 0 auto">'+
+    (SYNCM.conflict? '<button data-act="conf" style="background:#fff;color:var(--bad,#c0392b);border:0;border-radius:6px;padding:5px 10px;font:inherit;font-weight:700">حلّها</button>' : '')+
+    '<button data-act="warnHide" style="background:transparent;color:#fff;border:1px solid rgba(255,255,255,.5);border-radius:6px;padding:5px 9px;font:inherit">✕</button></span>';
+}
+
+/* ============================================================
+   نافذة التعارض — القرار للمستخدم، والاتنين محفوظين
+   ============================================================ */
+function modalConflict(){
+  var cl = CONF.cloud;
+  var cn = cl ? ((cl.students||[]).length+" طالب · "+(cl.groups||[]).length+" مجموعة · "+
+                 (cl.bookings||[]).length+" حجز") : "—";
+  var mn = (DB.students||[]).length+" طالب · "+(DB.groups||[]).length+" مجموعة · "+
+           (DB.bookings||[]).length+" حجز";
+  openModal(mh("تعارض بين جهازين")+'<div class="mb">'+
+    '<div class="note bad" style="margin-bottom:11px">'+
+      'فيه تعديلات اتعملت من جهاز تاني على نفس البيانات. '+
+      '<b>مفيش حاجة اتمسحت</b> — اختار انت أنهي نسخة تكمّل بيها، '+
+      'والتانية هتتحفظ نسخة احتياطية تقدر ترجعها.</div>'+
+    '<div class="grid2">'+
+      '<div><div class="mut" style="font-size:12px">النسخة اللي على الجهاز ده</div>'+
+        '<div style="font-size:13px">'+esc(mn)+'</div></div>'+
+      '<div><div class="mut" style="font-size:12px">نسخة السحابة</div>'+
+        '<div style="font-size:13px">'+esc(cn)+'</div></div>'+
+    '</div><div class="sep"></div>'+
+    '<button class="btn block" data-act="confPull" style="margin-bottom:8px">'+
+      '↓ اعتمد نسخة السحابة</button>'+
+    '<button class="btn ghost block" data-act="confPush" style="margin-bottom:8px">'+
+      '↑ اعتمد نسخة الجهاز ده</button>'+
+    '<div class="note">لو مش متأكد: اعتمد السحابة، وبعدين افتح '+
+      '<b>النسخ الاحتياطية</b> وقارن.</div>'+
+    '</div>');
+}
+
+/* ============================================================
+   نافذة النسخ الاحتياطية المحلية
+   ============================================================ */
+function dayLabel(t){
+  var d = new Date(t), now = new Date();
+  var a = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  var b = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  var diff = Math.round((b-a)/86400000);
+  if(diff===0) return "النهاردة";
+  if(diff===1) return "امبارح";
+  if(diff===2) return "أول امبارح";
+  if(diff<7)   return "من "+ar(diff)+" أيام";
+  return d.toLocaleDateString("ar-EG", { weekday:"long", day:"numeric", month:"long" });
+}
+function bakSizeTxt(b){
+  var kb = Math.round(num(b.size)/1024);
+  return kb > 1024 ? (kb/1024).toFixed(1)+" ميجا" : ar(kb)+" كيلو";
+}
+function modalBaks(){
+  var l = bakPrune().slice().sort(function(a,b){ return num(b.at)-num(a.at); });
+
+  /* تجميع بالأيام — عشان تلاقي «امبارح» بنظرة */
+  var out = "", lastDay = "";
+  l.forEach(function(b){
+    var dl = dayLabel(num(b.at));
+    if(dl !== lastDay){
+      lastDay = dl;
+      out += '<div style="font-weight:800;font-size:12px;color:var(--mut,#888);'+
+             'margin:14px 0 7px;letter-spacing:.02em">'+esc(dl)+'</div>';
+    }
+    out += '<div style="border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px">'+
+      '<div style="display:flex;justify-content:space-between;gap:8px;align-items:center">'+
+        '<div><div style="font-weight:700;font-size:13px">'+
+          esc(b.tag||"نسخة")+(b.manual?' <span class="mut">· يدوية</span>':'')+'</div>'+
+        '<div class="mut" style="font-size:12px">'+
+          esc(new Date(num(b.at)).toLocaleTimeString("ar-EG",{hour:"numeric",minute:"2-digit"}))+
+          ' · '+esc(b.dev||"")+'</div></div>'+
+        '<button class="btn ghost sm" data-act="bakGo" data-id="'+esc(b.id)+'">استرجاع</button>'+
+      '</div>'+
+      '<div class="mut" style="font-size:12px;margin-top:6px">'+
+        ar(b.s||0)+' طالب · '+ar(b.g||0)+' مجموعة · '+ar(b.b||0)+' حجز · '+
+        ar(b.p||0)+' دفعة · '+bakSizeTxt(b)+'</div>'+
+    '</div>';
+  });
+
+  var oldest = l.length ? dayLabel(num(l[l.length-1].at)) : "";
+  openModal(mh("النسخ الاحتياطية")+'<div class="mb">'+
+    '<div class="note" style="margin-bottom:4px">'+
+      'بيتحفظ: <b>كل نسخ آخر ١٢ ساعة</b>، و<b>نسخة من كل يوم لآخر أسبوعين</b>. '+
+      'بتتاخد تلقائيًا قبل أي سحب من السحابة وكل ٤ ساعات.'+
+      (l.length? ' <b>أقدم نسخة عندك: '+esc(oldest)+'.</b>' : '')+'</div>'+
+    (IDB.ok? '' : '<div class="note bad" style="margin-bottom:4px">التخزين الكبير مش شغال على المتصفح ده — '+
+      'المساحة محدودة فالنسخ هتبقى أقل.</div>')+
+    (l.length ? out : '<div class="note" style="margin-top:10px">لسه مفيش نسخ. '+
+      'أول نسخة هتتاخد تلقائيًا.</div>')+
+    '<div class="sep"></div>'+
+    '<button class="btn ghost block" data-act="bakNow" style="margin-bottom:8px">＋ خد نسخة دلوقتي</button>'+
+    '<button class="btn ghost block" data-act="forensic">🔍 استعادة الجلسة الضايعة</button>'+
+    '</div>'+'<div class="mf"><button class="btn" data-act="close">تمام</button></div>');
+}
+
+function opName(t){
+  return t==="att" ? "حضور" : t==="pay" ? "دفع" : t==="hw" ? "واجب" : t;
+}
+function modalForensic(){
+  var q = [];
+  try{ q = JSON.parse(localStorage.getItem(KEY+"_q")||"[]"); }catch(e){}
+  var lastUp = 0;
+  try{ lastUp = num(localStorage.getItem(KEY+"_syncAt"),0); }catch(e){}
+
+  var rows = q.slice().sort(function(a,b){ return num(b.at)-num(a.at); }).map(function(o){
+    var d = o.data||{};
+    var who = "";
+    if(d.bulk) who = "المجموعة كلها";
+    else if(d.sid){
+      var st = (DB.students||[]).filter(function(x){ return x.id===d.sid; })[0];
+      who = st ? st.name : "طالب مش موجود دلوقتي ("+d.sid+")";
+    }
+    var g = d.gid ? groupById(d.gid) : null;
+    return '<div style="border-bottom:1px solid var(--line);padding:8px 0">'+
+      '<div style="font-size:13px"><b>'+esc(opName(o.type))+'</b> · '+esc(who||"—")+'</div>'+
+      '<div class="mut" style="font-size:12px">'+
+        (g? esc(g.name)+" · " : "")+ esc(d.date||"") + " · " +
+        esc(new Date(num(o.at)).toLocaleString("ar-EG"))+'</div></div>';
+  }).join("");
+
+  openModal(mh("استعادة الجلسة الضايعة")+'<div class="mb">'+
+    '<div class="note" style="margin-bottom:11px">'+
+      'طابور المزامنة بيفضل محفوظ على الجهاز لحد ما يحصل رفع ناجح. '+
+      'لو شغلك ضاع قبل ما يترفع، السجل ده بيقولك <b>إيه اللي اتعمل بالظبط</b> '+
+      'عشان تعيده بسرعة.</div>'+
+    '<div class="grid2">'+
+      '<div><div class="mut" style="font-size:12px">آخر رفع ناجح</div>'+
+        '<div style="font-size:13px">'+
+        (lastUp? esc(new Date(lastUp).toLocaleString("ar-EG")) : "مفيش أي رفع")+'</div></div>'+
+      '<div><div class="mut" style="font-size:12px">عمليات لسه في الطابور</div>'+
+        '<div style="font-size:13px">'+ar(q.length)+'</div></div>'+
+    '</div><div class="sep"></div>'+
+    (q.length ? rows
+              : '<div class="note">الطابور فاضي — يعني كل اللي اتعمل على الجهاز ده اترفع، '+
+                'أو الطابور اتفضّى بعد رفع لاحق.</div>')+
+    (q.length ? '<div class="sep"></div>'+
+      '<button class="btn ghost block" data-act="qExport">↓ صدّر السجل ملف</button>' : '')+
+    '</div>'+'<div class="mf"><button class="btn" data-act="close">تمام</button></div>');
+}
+
 /* نافذة حالة السحابة */
 function modalCloud(){
   var on = fbOn();
@@ -9413,6 +10077,11 @@ function modalCloud(){
     '</div><div class="sep"></div>'+
     '<button class="btn block" data-act="syncNow" style="margin-bottom:8px">↻ ارفع البيانات دلوقتي</button>'+
     '<button class="btn ghost block" data-act="pullBookings" style="margin-bottom:8px">↓ اسحب طلبات الحجز</button>'+
+    '<button class="btn ghost block" data-act="baks" style="margin-bottom:8px">◷ النسخ الاحتياطية التلقائية</button>'+
+    '<div class="note '+(SYNC.multi?"bad":"")+'" style="margin-bottom:8px">'+
+      (SYNC.multi
+        ? '<b>تحذير:</b> البرنامج مفتوح دلوقتي على <b>'+esc(SYNC.multi.n||"جهاز تاني")+'</b>. اشتغل على جهاز واحد بس.'
+        : 'مفيش جهاز تاني شغّال دلوقتي. <span class="mut">جهازك: '+esc(DEV_NAME)+'</span>')+'</div>'+
     '<div class="note">شارك <b>رابط البرنامج</b> مع الطلاب — يدخلوا بكود مجموعتهم أو يحجزوا مكانهم.</div>'+
     '<div class="sep"></div>'+
     '<button class="btn ghost block" data-act="chPw" style="margin-bottom:8px">🔑 غيّر كلمة السر</button>'+
@@ -9462,7 +10131,7 @@ function restoreSession(){
       FB.teacherUid = t;
       if(t && t===u.uid){
         FB.role = "teacher";
-        syncDown().then(function(){ pullBookings(false); render(); });
+        syncDown().then(function(){ beatStart(); pullBookings(false); render(); });
       }
     }).catch(function(){});
   });
@@ -9731,7 +10400,10 @@ setInterval(function(){
 load();
 /* لو القفل شغّال، البرنامج يفتح مقفول */
 if(DB.lock && DB.lock.on && DB.lock.pin) UI.locked = true;
+try{ bakTick(); }catch(e){}
 restoreSession();
+/* من هنا ورايح أي حفظ يبقى تعديل حقيقي من المستخدم */
+setTimeout(function(){ BOOTING = false; }, 0);
 </script>
 </body>
 </html>
