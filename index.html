@@ -687,48 +687,198 @@ var CONF = { cloud:null, rev:0 };
    (سحب من السحابة · استرجاع ملف) وكل ٦ ساعات استخدام.
    ده اللي بيخلي أي غلطة قابلة للرجوع.
    ============================================================ */
+/* ============================================================
+   النسخ الاحتياطية
+
+   ليه IndexedDB مش localStorage؟
+   صور أسئلة الامتحانات بتتخزّن جوه البيانات نفسها، والصورة
+   لوحدها ممكن توصل ٤٠٠ كيلو. يعني نسخة واحدة ممكن تعدّي حد
+   الـ٥ ميجا بتاع localStorage. IndexedDB بيدّي مساحة أكبر
+   بكتير، فينفع نحتفظ بأيام مش بساعات.
+
+   الفهرس (بيانات مختصرة) بيفضل في localStorage عشان القراءة
+   تفضل فورية، والمحتوى نفسه في IndexedDB.
+   ============================================================ */
+var IDB = { db:null, ok:(typeof indexedDB!=="undefined") };
+function idbOpen(){
+  return new Promise(function(res, rej){
+    if(!IDB.ok) return rej(new Error("مفيش IndexedDB"));
+    if(IDB.db) return res(IDB.db);
+    var r;
+    try{ r = indexedDB.open("drosy_baks", 1); }catch(e){ return rej(e); }
+    r.onupgradeneeded = function(e){
+      var d = e.target.result;
+      if(!d.objectStoreNames.contains("baks")) d.createObjectStore("baks", { keyPath:"id" });
+    };
+    r.onsuccess = function(){ IDB.db = r.result; res(IDB.db); };
+    r.onerror   = function(){ rej(r.error || new Error("فشل الفتح")); };
+  });
+}
+function idbPut(id, text){
+  return idbOpen().then(function(d){
+    return new Promise(function(res, rej){
+      var t = d.transaction("baks","readwrite");
+      t.objectStore("baks").put({ id:id, text:text });
+      t.oncomplete = function(){ res(true); };
+      t.onerror    = function(){ rej(t.error); };
+    });
+  });
+}
+function idbGet(id){
+  return idbOpen().then(function(d){
+    return new Promise(function(res, rej){
+      var t = d.transaction("baks","readonly");
+      var q = t.objectStore("baks").get(id);
+      q.onsuccess = function(){ res(q.result ? q.result.text : null); };
+      q.onerror   = function(){ rej(q.error); };
+    });
+  });
+}
+function idbDel(id){
+  return idbOpen().then(function(d){
+    return new Promise(function(res){
+      var t = d.transaction("baks","readwrite");
+      t.objectStore("baks").delete(id);
+      t.oncomplete = function(){ res(true); };
+      t.onerror    = function(){ res(false); };
+    });
+  }).catch(function(){ return false; });
+}
+
 function bakList(){
   try{ return JSON.parse(localStorage.getItem(KEY+"_baks")||"[]"); }
   catch(e){ return []; }
 }
-function bakSave(tag, src){
+function bakIndexSave(l){
+  try{ localStorage.setItem(KEY+"_baks", JSON.stringify(l)); }catch(e){}
+}
+function bakDrop(rec){
+  if(rec.store==="idb") idbDel(rec.id);
+  else { try{ localStorage.removeItem(KEY+"_bak_"+rec.id); }catch(e){} }
+}
+
+/* ============================================================
+   سلّم الاحتفاظ
+
+   «آخر ١٠ نسخ» مش كفاية: يوم شغل واحد فيه سحب كتير ممكن
+   يملا العشرة كلهم بنسخ من نفس الساعة، وتبقى أقدم نسخة عندك
+   عمرها ساعتين. فالاحتفاظ بقى بالزمن مش بالعدد:
+
+   • كل نسخ آخر ١٢ ساعة (لحد ١٢ نسخة)
+   • أحدث نسخة من كل يوم في آخر ١٤ يوم
+   • النسخ اليدوية بتفضل دايمًا (لحد ٥)
+
+   يعني تقدر ترجع لأي يوم في الأسبوعين اللي فاتوا.
+   ============================================================ */
+var BAK_RECENT_H  = 12;
+var BAK_RECENT_N  = 12;
+var BAK_DAYS      = 14;
+var BAK_MANUAL_N  = 5;
+
+function bakPrune(){
+  var l = bakList();
+  if(!l.length) return l;
+  l.sort(function(a,b){ return num(a.at)-num(b.at); });
+  var now = Date.now(), keep = {};
+
+  /* ١) الحديثة */
+  var recent = l.filter(function(b){ return now - num(b.at) < BAK_RECENT_H*3600*1000; });
+  recent.slice(-BAK_RECENT_N).forEach(function(b){ keep[b.id] = 1; });
+
+  /* ٢) أحدث نسخة في كل يوم */
+  var byDay = {};
+  l.forEach(function(b){
+    if(now - num(b.at) > BAK_DAYS*86400000) return;
+    var d = new Date(num(b.at));
+    var k = d.getFullYear()+"-"+(d.getMonth()+1)+"-"+d.getDate();
+    if(!byDay[k] || num(b.at) > num(byDay[k].at)) byDay[k] = b;
+  });
+  Object.keys(byDay).forEach(function(k){ keep[byDay[k].id] = 1; });
+
+  /* ٣) اليدوية */
+  l.filter(function(b){ return b.manual; }).slice(-BAK_MANUAL_N)
+   .forEach(function(b){ keep[b.id] = 1; });
+
+  var out = [], gone = [];
+  l.forEach(function(b){ if(keep[b.id]) out.push(b); else gone.push(b); });
+  gone.forEach(bakDrop);
+  if(gone.length) bakIndexSave(out);
+  return out;
+}
+
+function bakSave(tag, src, manual){
   var d = src || DB;
   if(!d || !d.meta) return false;
   var payload;
+  /* التحويل لنص بيحصل **فورًا** — عشان لو البيانات اتغيّرت
+     بعد السطر ده على طول، النسخة تبقى اتصوّرت قبل التغيير */
   try{ payload = JSON.stringify(d); }catch(e){ return false; }
-  var id = "b"+Date.now().toString(36)+Math.random().toString(36).slice(2,5);
-  var rec = { id:id, at:Date.now(), tag:tag||"", dev:DEV_NAME, size:payload.length,
+
+  var l1 = bakList();
+  var at = Date.now();
+  if(l1.length){
+    var top = 0;
+    l1.forEach(function(b){ if(num(b.at) > top) top = num(b.at); });
+    if(at <= top) at = top + 1;          /* ترتيب مضمون */
+  }
+  var id  = "b"+at.toString(36)+Math.random().toString(36).slice(2,5);
+  var rec = { id:id, at:at, tag:tag||"", dev:DEV_NAME, size:payload.length,
+              manual:!!manual, store: IDB.ok ? "idb" : "ls",
               g:(d.groups||[]).length, s:(d.students||[]).length,
               b:(d.bookings||[]).length, p:(d.pays||[]).length };
-  var list = bakList();
-  /* لو المساحة ضاقت، بنشيل الأقدم ونعيد المحاولة */
-  for(var tries=0; tries<12; tries++){
+
+  if(IDB.ok){
+    /* الفهرس الأول وبالتزامن — عشان نسختين في نفس اللحظة
+       ما يمسحوش بعض */
+    var l0 = bakList(); l0.push(rec); bakIndexSave(l0);
+    idbPut(id, payload).then(function(){
+      bakPrune();
+    }).catch(function(){
+      /* IndexedDB وقع — نشيل السجل ونرجع لـ localStorage */
+      bakIndexSave(bakList().filter(function(x){ return x.id!==id; }));
+      IDB.ok = false; rec.store = "ls"; bakSaveLS(rec, payload);
+    });
+    return true;
+  }
+  return bakSaveLS(rec, payload);
+}
+
+/* الاحتياطي: localStorage بمساحة ضيقة — بنشيل الأقدم لو ضاقت */
+function bakSaveLS(rec, payload){
+  var l = bakList();
+  for(var t=0; t<14; t++){
     try{
-      localStorage.setItem(KEY+"_bak_"+id, payload);
-      list.push(rec);
-      while(list.length > 10){
-        var old = list.shift();
-        try{ localStorage.removeItem(KEY+"_bak_"+old.id); }catch(e){}
-      }
-      localStorage.setItem(KEY+"_baks", JSON.stringify(list));
+      localStorage.setItem(KEY+"_bak_"+rec.id, payload);
+      l.push(rec); bakIndexSave(l); bakPrune();
       return true;
     }catch(e){
-      if(!list.length) return false;
-      var o2 = list.shift();
-      try{ localStorage.removeItem(KEY+"_bak_"+o2.id); }catch(e2){}
-      try{ localStorage.setItem(KEY+"_baks", JSON.stringify(list)); }catch(e3){}
+      var old = l.shift();
+      if(!old) return false;
+      bakDrop(old); bakIndexSave(l);
     }
   }
   return false;
 }
+
+/* بيرجّع Promise — المحتوى ممكن يكون في IndexedDB */
 function bakGet(id){
-  try{ return JSON.parse(localStorage.getItem(KEY+"_bak_"+id)||"null"); }
-  catch(e){ return null; }
+  var rec = bakList().filter(function(b){ return b.id===id; })[0];
+  var fromLS = function(){
+    try{ return JSON.parse(localStorage.getItem(KEY+"_bak_"+id)||"null"); }
+    catch(e){ return null; }
+  };
+  if(rec && rec.store==="ls") return Promise.resolve(fromLS());
+  return idbGet(id).then(function(t){
+    if(t){ try{ return JSON.parse(t); }catch(e){ return null; } }
+    return fromLS();                 /* نسخ قديمة من قبل الترقية */
+  }).catch(function(){ return fromLS(); });
 }
-/* نسخة دورية كل ٦ ساعات استخدام */
+
+/* نسخة دورية — كل ٤ ساعات عشان يبقى فيه تغطية كويسة لكل يوم */
 function bakTick(){
-  var l = bakList(), last = l.length ? l[l.length-1].at : 0;
-  if(Date.now() - last > 6*3600*1000) bakSave("نسخة دورية");
+  var l = bakList(), last = l.length ? num(l[l.length-1].at) : 0;
+  if(Date.now() - last > 4*3600*1000) bakSave("نسخة دورية");
+  bakPrune();
 }
 
 /* ============================================================
@@ -910,7 +1060,7 @@ function cloudBak(rev){
   if(!fbOn() || FB.role!=="teacher") return;
   var last = 0;
   try{ last = num(localStorage.getItem(KEY+"_cbakAt"),0); }catch(e){}
-  if(Date.now() - last < 6*3600*1000) return;
+  if(Date.now() - last < 20*3600*1000) return;   /* نسخة سحابية في اليوم */
   var sz = 0;
   try{ sz = JSON.stringify(DB).length; }catch(e){ return; }
   if(sz > 2500000) return;                     /* كبيرة أوي — منعدّيها */
@@ -919,7 +1069,7 @@ function cloudBak(rev){
     .then(function(){ return fbGet("private/bak"); })
     .then(function(v){
       var ks = Object.keys(v||{}).sort(function(a,b){ return num(v[a].at)-num(v[b].at); });
-      while(ks.length > 3){
+      while(ks.length > 7){                        /* أسبوع في السحابة */
         var k = ks.shift();
         try{ FB.db.ref("private/bak/"+k).remove(); }catch(e){}
       }
@@ -8904,15 +9054,22 @@ var ACTS = {
   backup: backup,
   restore: restore,
   baks: function(){ modalBaks(); },
-  bakNow: function(){ toast(bakSave("يدوي")? "اتاخدت نسخة ✓" : "المساحة مش كفاية"); modalBaks(); },
+  bakNow: function(){
+    var ok = bakSave("يدوي", null, true);
+    toast(ok? "اتاخدت نسخة ✓" : "المساحة مش كفاية");
+    setTimeout(modalBaks, 250);
+  },
   bakGo: function(el){
-    var d = bakGet(el.dataset.id);
-    if(!d || !d.meta){ toast("النسخة مش موجودة"); return; }
     if(!confirm("استرجاع النسخة دي؟\n\nالبيانات الحالية هتتحفظ نسخة احتياطية الأول.")) return;
-    bakSave("قبل استرجاع نسخة");
-    DB = d; normalizeDB(); ensureCodes(); save();
-    UI = { tab:"home", sub:null, q:"", gid:"", date:"" };
-    closeModal(); render(); toast("اترجّعت النسخة — راجعها وبعدين ارفع");
+    var id = el.dataset.id;
+    toast("بنجيب النسخة…");
+    bakGet(id).then(function(d){
+      if(!d || !d.meta){ toast("النسخة مش موجودة"); return; }
+      bakSave("قبل استرجاع نسخة");
+      DB = d; normalizeDB(); ensureCodes(); save();
+      UI = { tab:"home", sub:null, q:"", gid:"", date:"" };
+      closeModal(); render(); toast("اترجّعت النسخة — راجعها وبعدين ارفع");
+    }).catch(function(){ toast("مقدرناش نقرا النسخة"); });
   },
   warnHide: function(){ UI.warnHid = true; render(); },
   forensic: function(){ modalForensic(); },
@@ -9749,23 +9906,58 @@ function modalConflict(){
 /* ============================================================
    نافذة النسخ الاحتياطية المحلية
    ============================================================ */
+function dayLabel(t){
+  var d = new Date(t), now = new Date();
+  var a = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  var b = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  var diff = Math.round((b-a)/86400000);
+  if(diff===0) return "النهاردة";
+  if(diff===1) return "امبارح";
+  if(diff===2) return "أول امبارح";
+  if(diff<7)   return "من "+ar(diff)+" أيام";
+  return d.toLocaleDateString("ar-EG", { weekday:"long", day:"numeric", month:"long" });
+}
+function bakSizeTxt(b){
+  var kb = Math.round(num(b.size)/1024);
+  return kb > 1024 ? (kb/1024).toFixed(1)+" ميجا" : ar(kb)+" كيلو";
+}
 function modalBaks(){
-  var l = bakList().slice().reverse();
-  var rows = l.length ? l.map(function(b){
-    return '<div style="border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px">'+
+  var l = bakPrune().slice().sort(function(a,b){ return num(b.at)-num(a.at); });
+
+  /* تجميع بالأيام — عشان تلاقي «امبارح» بنظرة */
+  var out = "", lastDay = "";
+  l.forEach(function(b){
+    var dl = dayLabel(num(b.at));
+    if(dl !== lastDay){
+      lastDay = dl;
+      out += '<div style="font-weight:800;font-size:12px;color:var(--mut,#888);'+
+             'margin:14px 0 7px;letter-spacing:.02em">'+esc(dl)+'</div>';
+    }
+    out += '<div style="border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px">'+
       '<div style="display:flex;justify-content:space-between;gap:8px;align-items:center">'+
-        '<div><div style="font-weight:700;font-size:13px">'+esc(b.tag||"نسخة")+'</div>'+
-        '<div class="mut" style="font-size:12px">'+esc(new Date(b.at).toLocaleString("ar-EG"))+'</div></div>'+
+        '<div><div style="font-weight:700;font-size:13px">'+
+          esc(b.tag||"نسخة")+(b.manual?' <span class="mut">· يدوية</span>':'')+'</div>'+
+        '<div class="mut" style="font-size:12px">'+
+          esc(new Date(num(b.at)).toLocaleTimeString("ar-EG",{hour:"numeric",minute:"2-digit"}))+
+          ' · '+esc(b.dev||"")+'</div></div>'+
         '<button class="btn ghost sm" data-act="bakGo" data-id="'+esc(b.id)+'">استرجاع</button>'+
       '</div>'+
       '<div class="mut" style="font-size:12px;margin-top:6px">'+
-        ar(b.s||0)+' طالب · '+ar(b.g||0)+' مجموعة · '+ar(b.b||0)+' حجز · '+ar(b.p||0)+' دفعة</div>'+
+        ar(b.s||0)+' طالب · '+ar(b.g||0)+' مجموعة · '+ar(b.b||0)+' حجز · '+
+        ar(b.p||0)+' دفعة · '+bakSizeTxt(b)+'</div>'+
     '</div>';
-  }).join("") : '<div class="note">لسه مفيش نسخ. أول نسخة هتتاخد تلقائيًا.</div>';
+  });
+
+  var oldest = l.length ? dayLabel(num(l[l.length-1].at)) : "";
   openModal(mh("النسخ الاحتياطية")+'<div class="mb">'+
-    '<div class="note" style="margin-bottom:10px">آخر ١٠ نسخ على الجهاز ده. '+
-      'بتتاخد تلقائيًا قبل أي سحب من السحابة وكل ٦ ساعات.</div>'+
-    rows+
+    '<div class="note" style="margin-bottom:4px">'+
+      'بيتحفظ: <b>كل نسخ آخر ١٢ ساعة</b>، و<b>نسخة من كل يوم لآخر أسبوعين</b>. '+
+      'بتتاخد تلقائيًا قبل أي سحب من السحابة وكل ٤ ساعات.'+
+      (l.length? ' <b>أقدم نسخة عندك: '+esc(oldest)+'.</b>' : '')+'</div>'+
+    (IDB.ok? '' : '<div class="note bad" style="margin-bottom:4px">التخزين الكبير مش شغال على المتصفح ده — '+
+      'المساحة محدودة فالنسخ هتبقى أقل.</div>')+
+    (l.length ? out : '<div class="note" style="margin-top:10px">لسه مفيش نسخ. '+
+      'أول نسخة هتتاخد تلقائيًا.</div>')+
     '<div class="sep"></div>'+
     '<button class="btn ghost block" data-act="bakNow" style="margin-bottom:8px">＋ خد نسخة دلوقتي</button>'+
     '<button class="btn ghost block" data-act="forensic">🔍 استعادة الجلسة الضايعة</button>'+
