@@ -108,7 +108,8 @@ h1,h2,h3,.dsp{font-family:Cairo,system-ui,sans-serif;font-weight:800;margin:0;li
   body.in .side{transform:translateX(0);box-shadow:none}
   body.in .scrim{display:none}
   body.in .burger{display:none}
-  body.in .wrap{margin-inline-end:268px;max-width:820px}
+  body.in .wrap{max-width:820px;margin-inline-end:auto;
+                margin-inline-start:calc(268px + max(0px, (100vw - 268px - 820px) / 2))}
 }
 
 /* ---------- البطاقات ---------- */
@@ -265,8 +266,19 @@ th{background:var(--paper);font-weight:800;font-size:12px;color:var(--mut);font-
        display:grid;place-items:center;margin:0 auto;font-family:Cairo,sans-serif;
        font-weight:900;font-size:27px}
 
+/* ---------- الكشف المالي (v7.6) ---------- */
+.fin{display:flex;flex-wrap:wrap;gap:1px;
+     background:var(--line);border:1px solid var(--line);border-radius:11px;overflow:hidden}
+.fin>div{background:var(--card);padding:7px 9px;min-width:0;flex:1 1 88px}   /* آخر صف بيتمدّد — مفيش خانة فاضية */
+.fin .k{font-size:10.5px;color:var(--mut);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fin .v{font-family:Cairo,sans-serif;font-weight:800;font-size:14.5px;line-height:1.35;white-space:nowrap}
+.fin .v.ok{color:var(--ok)} .fin .v.bad{color:var(--bad)} .fin .v.warn{color:var(--warn)}
+.paybar{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.paybar .btn{padding:7px 11px;font-size:12.5px;border-radius:9px}
+.btn.wa{background:#1FA855}
+.mo.part{background:var(--warn-l);border-color:var(--warn);color:var(--warn)}
 @media print{
-  .top,.nav,.noprint,.chips{display:none!important}
+  .top,.nav,.noprint,.chips,.paybar,.fab{display:none!important}
   body{background:#fff}
   .wrap{padding:0;max-width:none}
   .card{border-color:#999;break-inside:avoid}
@@ -458,7 +470,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "7.5";
+var APP_VER = "7.6";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -482,6 +494,9 @@ function blank(){
     books:[],         /* المذكرات والكتب ومبيعاتها */
     sales:[],         /* عمليات بيع المذكرات */
     reminders:[],     /* التذكيرات */
+    discounts:[],     /* الخصومات — فردي وأسرة (v7.6) */
+    voids:[],         /* دفعات ملغاة — عكس معاملة بسببها وتاريخها */
+    payNotes:[],      /* متابعات «لم يسدد» */
     seq:1
   };
 }
@@ -500,7 +515,7 @@ function yearNow(){
    ============================================================ */
 var DB_LISTS = ["groups","students","pays","bookings","notices","sesDue",
                 "years","res","attempts","families","exams","tasks",
-                "books","sales","reminders"];
+                "books","sales","reminders","discounts","voids","payNotes"];
 function normalizeDB(){
   if(!DB || typeof DB!=="object") DB = blank();
   var d = blank();
@@ -1000,6 +1015,7 @@ function pubSnapshot(){
         .filter(function(x){ return num(x.rest)>0; })
         .map(function(x){
           return { what:x.what, date:x.date, kind:x.kind,
+                   gross:num(x.gross), disc:num(x.disc),
                    amount:num(x.amount), paidAmt:num(x.paidAmt||0), rest:num(x.rest) };
         });
     }catch(e){}
@@ -1409,10 +1425,18 @@ function honorBoard(){
    المدرّس بيشوف الرسالة ويبعتها بنفسه، فمفيش حاجة بتروح بالغلط.
    ============================================================ */
 function waNum(p){
-  var d = String(p||"").replace(/\D/g,"");
+  /* أرقام عربية أو فارسية → لاتيني، وبعدين نشيل أي حاجة غير الأرقام */
+  var d = String(p||"").replace(/[٠-٩]/g, function(c){ return "٠١٢٣٤٥٦٧٨٩".indexOf(c); })
+                       .replace(/[۰-۹]/g, function(c){ return "۰۱۲۳۴۵۶۷۸۹".indexOf(c); })
+                       .replace(/\D/g,"");
   if(!d) return "";
-  if(d.indexOf("20")===0 && d.length>=12) return d;      /* عليه كود الدولة */
-  if(d.indexOf("0")===0) return "2"+d;                   /* 01xxxxxxxxx → 201xxxxxxxxx */
+  if(d.indexOf("00")===0) d = d.slice(2);                 /* 0020… → 20… */
+  if(d.indexOf("20")===0 && d.length>=12){
+    /* عليه كود الدولة — ونشيل الصفر المحلي الزايد لو اتكتب (200 10… → 20 10…) */
+    if(d.charAt(2)==="0" && d.length===13) d = "20"+d.slice(3);
+    return d;
+  }
+  if(d.indexOf("0")===0) return "2"+d;                    /* 01xxxxxxxxx → 201xxxxxxxxx */
   return "20"+d;
 }
 function waLink(phone, text){
@@ -1434,7 +1458,14 @@ function waMsg(kind, s, extra){
     "{الدرجة}": extra.mark!=null ? String(extra.mark) : "",
     "{من}": extra.max!=null ? String(extra.max) : "",
     "{المبلغ}": extra.amount!=null ? money(extra.amount) : "",
-    "{الشهر}": extra.month || ""
+    "{الشهر}": extra.month || "",
+    /* تفاصيل الكشف — للرسائل المالية */
+    "{الأصلي}": extra.gross!=null ? money(extra.gross) : "",
+    "{الخصم}": extra.disc!=null ? money(extra.disc) : "",
+    "{الصافي}": extra.net!=null ? money(extra.net) : "",
+    "{المدفوع}": extra.paid!=null ? money(extra.paid) : "",
+    "{المتبقي}": extra.rest!=null ? money(extra.rest) : "",
+    "{تاريخ_الاستحقاق}": extra.due ? fmtD(extra.due) : ""
   };
   var body = custom && custom.trim() ? custom : ({
     absent: "السلام عليكم\nولي أمر الطالب {الطالب}\n"+
@@ -1966,7 +1997,7 @@ function dueMonths(s, g){
 }
 function studentDue(s){
   var mode = payModeOf(s);
-  if(mode==="free") return { due:0, paid:0, rest:0, mode:"free" };
+  if(mode==="free") return { due:0, paid:0, rest:0, mode:"free", gross:0, disc:0, net:0 };
   /* ============================================================
      المستحقات لحد النهاردة — بس بنضم كل دفعاته الفعلية كمان،
      عشان لو دفع مقدّم لشهر جاي يظهر في المدفوع مش يختفي.
@@ -1974,9 +2005,13 @@ function studentDue(s){
   var rows = duesOf(s.id, today());
   var due  = rows.reduce(function(a,x){ return a+num(x.amount); }, 0);
   var rest = rows.reduce(function(a,x){ return a+num(x.rest); }, 0);
+  var gross = rows.reduce(function(a,x){ return a+num(x.gross); }, 0);
+  var disc  = rows.reduce(function(a,x){ return a+num(x.disc); }, 0);
   var paid = 0;
   DB.pays.forEach(function(p){ if(p.sid===s.id) paid += num(p.amount); });
-  return { due: Math.max(due, paid), paid: paid, rest: rest, mode: mode };
+  /* due = الصافي بعد الخصم · gross = الأصلي · disc = الخصم */
+  return { due: Math.max(due, paid), paid: paid, rest: rest, mode: mode,
+           gross: gross, disc: disc, net: due };
 }
 function lateStudents(){
   return activeStudents().filter(function(s){ return studentDue(s).rest > 0; })
@@ -2056,13 +2091,8 @@ function endSes(gid, d){
      { id, sid, gid, amount, date, kind:"month"|"ses",
        mi (للشهري) | dueId+dueDate (للحصة), at }
    ============================================================ */
-function payDel(p){
-  if(!p) return;
-  DB.pays = DB.pays.filter(function(x){ return x!==p; });
-  /* لو دفعة حصة، نشيل العلامة القديمة كمان */
-  if(p.dueId) (DB.sesDue||[]).forEach(function(x){
-    if(x.id===p.dueId){ x.paid=false; x.paidAt=""; } });
-}
+/* v7.6: الإلغاء بقى عكس معاملة — الدفعة بتتنقل لسجل الملغيات مش بتتمسح */
+function payDel(p, reason){ return payVoid(p, reason || "إلغاء دفعة"); }
 function payAdd(o){
   setTimeout(function(){
     queueOp("pay", { gid:o.gid, date:o.date||today(), sid:o.sid, amount:o.amount });
@@ -2071,7 +2101,8 @@ function payAdd(o){
             date:o.date || today(), kind:o.kind || "month", at:Date.now(),
             by: (DB.meta.name || "المدرّس") };
   if(o.kind==="ses"){ p.dueId = o.dueId; p.dueDate = o.dueDate; }
-  else p.mi = num(o.mi);
+  else{ p.mi = num(o.mi); if(o.mk) p.mk = o.mk; }
+  if(o.note) p.note = String(o.note);
   DB.pays.push(p);
   return p;
 }
@@ -2107,13 +2138,21 @@ function paidForMonth(sid, gid, mi){
   });
   return t;
 }
-function duePaid(due){ return paidForDue(due.id) >= num(due.amount) - 0.001; }
-function dueRest(due){ return Math.max(0, num(due.amount) - paidForDue(due.id)); }
+/* صافي المستحق بعد الخصم — لصف جاهز أو لسجل حصة خام */
+function dueNet(due){
+  if(!due) return 0;
+  if(due.gross !== undefined) return num(due.amount);
+  var r = finRowById(due.sid, due.id);
+  return r ? num(r.amount) : num(due.amount);
+}
+function duePaid(due){ return paidForDue(due.id) >= dueNet(due) - 0.001; }
+function dueRest(due){ return Math.max(0, dueNet(due) - paidForDue(due.id)); }
 /* حالة الدفع النصية */
 function payLabel(amount, paid){
+  if(num(amount) <= 0) return { t:"لا يوجد مستحق", c:"" };
   if(paid <= 0) return { t:"لم يدفع", c:"bad" };
-  if(paid >= num(amount) - 0.001) return { t:"مدفوع", c:"ok" };
-  return { t:"مدفوع جزئيًا", c:"warn" };
+  if(paid >= num(amount) - 0.001) return { t:"دفع بالكامل", c:"ok" };
+  return { t:"دفع جزءًا", c:"warn" };
 }
 /* ترحيل: أي حصة معلّمة مدفوعة من غير سجل → بنعملها سجل */
 /* ============================================================
@@ -2217,12 +2256,184 @@ function billEligible(s, g, date){
   return String(date) >= String(from);
 }
 
-function duesOf(sid, upto){
+/* ============================================================
+   الخصومات  (v7.6)
+
+   الخصم سجل مستقل في DB.discounts — مش تعديل في سعر المجموعة.
+   سعر المجموعة بيفضل زي ما هو لكل الطلاب، والخصم بيظهر منفصل
+   في كشف حساب الطالب بسببه وتاريخه.
+
+   شكل السجل:
+     { id, scope:"stu"|"fam", sid | famId,
+       type:"fixed"|"pct"|"total",   total = مبلغ للأسرة كلها بيتوزّع
+       value, shares:{sid:مبلغ},     shares للنوع total بس
+       per:"due"|"month",            month = ميزانية شهرية للطالب
+       repeat:"monthly"|"once", dueId,
+       from, to, incl:[dueId],       incl = مستحقات قديمة اختارها المدرس صراحةً
+       gid, stack, reason, note, at, by, off:{at,reason} }
+
+   القواعد:
+     · صافي المستحق = المستحق الأصلي − الخصومات المعتمدة
+     · الصافي مايقلّش عن صفر مهما اتكرر الخصم
+     · مفيش أثر رجعي: الخصم بيمسك المستحقات اللي تاريخها من
+       تاريخ بدايته بس، إلا اللي المدرس اختارها بنفسه (incl)
+     · خصم أسرة + خصم فردي على نفس المستحق = **الأكبر بس**،
+       إلا لو الخصم الفردي معلّم «يتجمع مع خصم الأسرة»
+   ============================================================ */
+var DISC_REASONS = ["التفوق الدراسي","الظروف المادية","خصم استثنائي","خصم بموافقة المدرس","خصم إخوة"];
+
+function discById(id){
+  var L = DB.discounts||[];
+  for(var i=0;i<L.length;i++) if(L[i].id===id) return L[i];
+  return null;
+}
+/* الخصومات الشغالة اللي تخص الطالب — فردي + أسرته الحالية */
+function discsFor(s){
+  return (DB.discounts||[]).filter(function(dc){
+    if(dc.off) return false;
+    if(dc.scope==="fam") return !!s.famId && dc.famId===s.famId;
+    return dc.sid===s.id;
+  });
+}
+function discValueTxt(dc){
+  if(dc.type==="pct")   return ar(num(dc.value))+"٪";
+  if(dc.type==="total") return money(dc.value)+" للأسرة كلها";
+  return money(dc.value);
+}
+function discName(dc){
+  return (dc.scope==="fam" ? "خصم الأسرة" : "خصم")+(dc.reason? " — "+dc.reason : "");
+}
+/* فترة الخصم بالكلام */
+function discPeriodTxt(dc){
+  if(dc.repeat==="once") return "لمرة واحدة";
+  return "من "+fmtD(dc.from||"")+(dc.to? " إلى "+fmtD(dc.to) : " — مفتوح");
+}
+/* الخصم لسه شغال على مستحقات جاية؟ */
+function discLive(dc){
+  if(dc.off) return false;
+  if(dc.repeat==="once") return false;
+  return !dc.to || dc.to >= today();
+}
+/* هل الخصم بيمسك المستحق ده؟ */
+function discHits(dc, s, R, once){
+  if(dc.gid && dc.gid!==R.gid) return false;
+  /* مستحقات قديمة اختارها المدرس بنفسه (للأسرة: مربوطة بالابن) */
+  var inc = dc.incl || [];
+  if(inc.indexOf(R.id)>=0 || inc.indexOf(s.id+":"+R.id)>=0) return true;
+  var from = dc.from || "";
+  /* عضو جديد في الأسرة: خصم الأسرة مايرجعش على مستحقاته القديمة */
+  if(dc.scope==="fam" && s.famSince && s.famSince > from) from = s.famSince;
+  if(dc.repeat==="once"){
+    if(dc.dueId) return dc.dueId===R.id;
+    if(once[dc.id]) return once[dc.id]===R.id;
+    return !(from && R.date < from);
+  }
+  if(from && R.date < from) return false;
+  if(dc.to && R.date > dc.to) return false;
+  return true;
+}
+/* قيمة الخصم على المستحق ده — قبل تطبيق سياسة التجميع */
+function discAmount(dc, s, R, budget){
+  var g = num(R.gross);
+  if(g<=0) return 0;
+  if(dc.type==="pct")
+    return Math.min(g, Math.round(g * Math.min(100, Math.max(0, num(dc.value))) / 100));
+  var v = dc.type==="total" ? num((dc.shares||{})[s.id]) : num(dc.value);
+  if(v<=0) return 0;
+  if(dc.per==="month"){
+    /* ميزانية شهرية: مبتتكررش على كل حصة ولا كل مجموعة */
+    var left = v - (budget[dc.id+"|"+R.mk]||0);
+    return Math.max(0, Math.min(left, g));
+  }
+  return Math.min(v, g);
+}
+/* تطبيق الخصومات على مستحقات الطالب — بالترتيب من الأقدم */
+function applyDiscounts(s, rows){
+  rows.forEach(function(R){ R.gross = num(R.amount); R.disc = 0; R.parts = []; });
+  var list = discsFor(s);
+  if(!list.length) return rows;
+  var budget = {}, once = {};
+  function sum(a){ return a.reduce(function(t,c){ return t+c.a; }, 0); }
+  rows.forEach(function(R){
+    var cand = [];
+    list.forEach(function(dc){
+      if(!discHits(dc, s, R, once)) return;
+      var a = discAmount(dc, s, R, budget);
+      if(a>0) cand.push({ dc:dc, a:a });
+    });
+    if(!cand.length) return;
+    var fam = cand.filter(function(c){ return c.dc.scope==="fam"; });
+    var ind = cand.filter(function(c){ return c.dc.scope!=="fam" && !c.dc.stack; });
+    var stk = cand.filter(function(c){ return c.dc.scope!=="fam" && c.dc.stack; });
+    var keep, skip = [], why = "";
+    if(fam.length && ind.length){
+      /* السياسة: الأكبر بس */
+      if(sum(ind) >= sum(fam)){ keep = stk.concat(ind); skip = fam; why = "فيه خصم فردي أكبر"; }
+      else{ keep = stk.concat(fam); skip = ind; why = "خصم الأسرة أكبر"; }
+    }else keep = stk.concat(fam, ind);
+    var left = R.gross;
+    keep.forEach(function(c){
+      var a = Math.min(c.a, left);
+      if(a<=0){ R.parts.push({ id:c.dc.id, scope:c.dc.scope, name:discName(c.dc), a:0, would:c.a,
+                                skipped:true, why:"المستحق اتخصم بالكامل" }); return; }
+      left -= a; R.disc += a;
+      R.parts.push({ id:c.dc.id, scope:c.dc.scope, name:discName(c.dc), a:a });
+      if(c.dc.per==="month" && c.dc.type!=="pct"){
+        var k = c.dc.id+"|"+R.mk; budget[k] = (budget[k]||0) + a;
+      }
+      if(c.dc.repeat==="once" && !c.dc.dueId) once[c.dc.id] = R.id;
+    });
+    skip.forEach(function(c){
+      R.parts.push({ id:c.dc.id, scope:c.dc.scope, name:discName(c.dc), a:0, would:c.a,
+                     skipped:true, why:why });
+    });
+    R.amount = Math.max(0, R.gross - R.disc);
+  });
+  return rows;
+}
+
+/* ============================================================
+   المستحقات — المصدر الوحيد لكل الشاشات
+
+   كل صف: المستحق الأصلي (gross) · الخصم (disc) · الصافي (amount)
+          · المدفوع (paidAmt) · المتبقي (rest) · الحالة (st)
+   «amount» هو الصافي بعد الخصم — فكل الشاشات القديمة اللي بتقرا
+   amount و rest بتشتغل صح من غير تعديل.
+
+   all=true: بيتجاهل إن الطالب معفي دلوقتي (لعرض السجل القديم).
+   ============================================================ */
+function payIndex(sid){
+  var byDue = {}, byMon = {};
+  DB.pays.forEach(function(p){
+    if(p.sid!==sid) return;
+    if(p.dueId) byDue[p.dueId] = (byDue[p.dueId]||0) + num(p.amount);
+    else if((p.kind||"month")==="month"){
+      var k = p.gid+"|"+num(p.mi);
+      byMon[k] = (byMon[k]||0) + num(p.amount);
+    }
+  });
+  return { due:byDue, mon:byMon };
+}
+/* حالة سداد المستحق — الخمس حالات */
+var PAY_ST = {
+  unpaid:  { t:"لم يدفع",             c:"bad"  },
+  partial: { t:"دفع جزءًا من المبلغ", c:"warn" },
+  paid:    { t:"دفع بالكامل",         c:"ok"   },
+  exempt:  { t:"معفي",                c:"ok"   },
+  none:    { t:"لا يوجد مستحق حاليًا", c:""     }
+};
+function dueSt(R){
+  if(num(R.amount) <= 0) return "none";              /* اتخصم بالكامل */
+  if(num(R.paidAmt) <= 0) return "unpaid";
+  if(num(R.rest) > 0) return "partial";
+  return "paid";
+}
+function finRows(sid, upto, all){
   upto = upto || today();
   var s = studentById(sid);
   if(!s) return [];
   /* معفي دلوقتي؟ مفيش أي مستحق حالي — والسجل القديم بيفضل محفوظ */
-  if(isExempt(s)) return [];
+  if(!all && isExempt(s)) return [];
   var out = [];
   if(payModeOf(s)==="ses"){
     /* بالحصة: من الحصص المسجّلة — وجوه نافذة الاحتساب بس */
@@ -2230,13 +2441,12 @@ function duesOf(sid, upto){
       if(x.sid!==sid) return;
       if(x.date > upto) return;
       if(!billEligible(s, groupById(x.gid), x.date)) return;
-      var pd0 = paidForDue(x.id);
-      out.push({ kind:"ses", id:x.id, gid:x.gid, date:x.date,
-                 amount:num(x.amount), paid:duePaid(x), paidAmt:pd0,
-                 rest:dueRest(x), what:"حصة "+fmtD(x.date) });
+      out.push({ kind:"ses", id:x.id, sid:sid, gid:x.gid, date:x.date,
+                 mk:String(x.date).slice(0,7),
+                 amount:num(x.amount), what:"حصة "+fmtD(x.date) });
     });
   }else{
-    /* شهري: من بداية الاحتساب لحد النهاردة — شهر بشهر */
+    /* شهري: من بداية الاحتساب لحد التاريخ المطلوب — شهر بشهر */
     studentGroups(s).forEach(function(g){
       var from = billFrom(s, g);
       if(!from) return;
@@ -2247,21 +2457,88 @@ function duesOf(sid, upto){
       while((y < endY || (y===endY && m <= endM)) && guard++ < 60){
         var mk = y+"-"+String(m).padStart(2,"0");
         var dueDate = mk+"-"+String(payday).padStart(2,"0");
-        /* المستحق لازم يكون بعد البداية وقبل أو مع النهاردة */
+        /* المستحق لازم يكون بعد البداية وقبل أو مع التاريخ المطلوب */
         if(dueDate <= upto && dueDate >= from && !isExemptOn(s, dueDate)){
-          var pdA = paidForMonth(sid, g.id, m);
-          out.push({ kind:"month", id:g.id+"|"+mk, gid:g.id, date:dueDate, mi:m,
-                     amount:num(g.fee), paidAmt:pdA,
-                     paid: pdA >= num(g.fee)-0.001,
-                     rest: Math.max(0, num(g.fee)-pdA),
+          out.push({ kind:"month", id:g.id+"|"+mk, sid:sid, gid:g.id, date:dueDate,
+                     mi:m, mk:mk, amount:num(g.fee),
                      what:(MONTHS[m-1]||"")+" "+y });
         }
         m++; if(m>12){ m=1; y++; }
       }
     });
   }
-  return out.sort(function(a,b){ return String(a.date).localeCompare(String(b.date)); });
+  out.sort(function(a,b){
+    return String(a.date).localeCompare(String(b.date)) || String(a.id).localeCompare(String(b.id)); });
+  applyDiscounts(s, out);
+  var ix = payIndex(sid);
+  out.forEach(function(R){
+    R.paidAmt = R.kind==="ses" ? (ix.due[R.id]||0) : (ix.mon[R.gid+"|"+R.mi]||0);
+    R.rest = Math.max(0, R.amount - R.paidAmt);
+    if(R.rest < 0.005) R.rest = 0;
+    R.over = Math.max(0, R.paidAmt - R.amount);
+    if(R.over < 0.005) R.over = 0;
+    R.paid = R.paidAmt >= R.amount - 0.001;
+    R.st = dueSt(R);
+  });
+  return out;
 }
+/* كل مستحقات الطالب لحد تاريخ معيّن */
+function duesOf(sid, upto){ return finRows(sid, upto, false); }
+/* مستحق واحد بالمعرّف — حتى لو تاريخه لسه ما جاش (دفع مقدّم) */
+function finRowById(sid, id, upto){
+  var rows = finRows(sid, upto || "9999-12-31", true);
+  for(var i=0;i<rows.length;i++) if(rows[i].id===id) return rows[i];
+  return null;
+}
+/* دفعات مستحق معيّن — كل دفعة سجل مستقل */
+function paysOfRow(R){
+  return DB.pays.filter(function(p){
+    if(p.sid!==R.sid) return false;
+    if(R.kind==="ses") return p.dueId===R.id;
+    return !p.dueId && (p.kind||"month")==="month" && p.gid===R.gid && num(p.mi)===num(R.mi);
+  }).sort(function(a,b){ return (a.at||0)-(b.at||0); });
+}
+/* الدفعة دي متوجّهة لأنهي مستحق؟ */
+function payWhat(p){
+  var g = groupById(p.gid);
+  var w = p.dueId ? "حصة "+fmtD(p.dueDate||p.date)
+                  : ((MONTHS[num(p.mi)-1]||"اشتراك")+(p.mk? " "+String(p.mk).slice(0,4) : ""));
+  return w + (g? " — "+g.name : "");
+}
+
+/* ============================================================
+   ملخّص حساب الطالب — نفس الأرقام في كل شاشة
+     gross  المستحق الأصلي لحد التاريخ
+     disc   الخصومات
+     net    صافي المستحق
+     paid   المدفوع من المستحقات دي
+     rest   المتبقي
+     adv    مدفوع مقدّم لمستحقات لسه ما جاتش
+     credit زيادة مدفوعة عن الصافي (بعد خصم اتضاف لاحقًا مثلًا)
+   ============================================================ */
+function finSummary(sid, date){
+  date = date || today();
+  var s = studentById(sid);
+  var o = { sid:sid, date:date, exempt:false, rows:[], gross:0, disc:0, net:0,
+            paid:0, rest:0, adv:0, credit:0, st:"none", arrears:0, dueToday:0 };
+  if(!s) return o;
+  if(isExemptOn(s, date)){ o.exempt = true; o.st = "exempt"; return o; }
+  var rows = duesOf(sid, date);
+  var all = 0;
+  DB.pays.forEach(function(p){ if(p.sid===sid) all += num(p.amount); });
+  rows.forEach(function(R){
+    o.gross += R.gross; o.disc += R.disc; o.net += R.amount;
+    o.paid += R.paidAmt; o.rest += R.rest; o.credit += R.over;
+    if(R.rest>0){ if(R.date===date) o.dueToday += R.rest; else o.arrears += R.rest; }
+  });
+  o.rows = rows;
+  o.adv = Math.max(0, all - o.paid);
+  o.paidAll = all;
+  o.st = !rows.length || o.net<=0 ? "none"
+       : (o.rest<=0 ? "paid" : (o.paid>0 ? "partial" : "unpaid"));
+  return o;
+}
+
 /* تصنيف المستحقات: النهاردة · قديم · جاي */
 function dueBuckets(sid){
   var t = today();
@@ -2282,20 +2559,20 @@ function dueBuckets(sid){
    بتستخدمها كل الشاشات: لوحة اليوم · المجموعة · ملف الطالب ·
    المتأخرات · التقارير. مفيش منطق تاني في أي مكان.
 
-   المشكلة اللي كانت: الصف كان بيقول «مفيش تحصيل النهاردة»
-   للطالب الشهري لأن تاريخ استحقاقه (يوم التحصيل) عدّى — رغم
-   إنه لسه **مش دافع**. دلوقتي بنفرّق بين:
+   بنفرّق بين:
      · مستحق النهاردة  (تاريخه = النهاردة)
      · متأخر           (تاريخه عدّى ولسه مش مدفوع)
+   والمستحق الجديد مش بيتخلط بالمتأخرات القديمة.
    ============================================================ */
 function payStatus(sid, date){
   date = date || today();
   var s = studentById(sid);
   if(!s) return null;
   if(isExemptOn(s, date))
-    return { exempt:true, mode:"free", label:"معفي",
+    return { exempt:true, mode:"free", label:"معفي", st:"exempt",
              dueToday:0, arrears:0, total:0, paidToday:0,
-             todayRows:[], oldRows:[], hasAny:false };
+             gross:0, disc:0, net:0, paid:0, credit:0,
+             todayRows:[], oldRows:[], rows:[], hasAny:false };
   var rows = duesOf(sid, date);
   var todayRows = rows.filter(function(x){ return x.date===date && x.rest>0; });
   var oldRows   = rows.filter(function(x){ return x.date < date && x.rest>0; });
@@ -2304,6 +2581,11 @@ function payStatus(sid, date){
   /* اتدفع النهاردة؟ */
   var paidToday = 0;
   DB.pays.forEach(function(p){ if(p.sid===sid && p.date===date) paidToday += num(p.amount); });
+  /* الكشف: المفتوح + مستحقات النهاردة حتى لو اتسدّدت */
+  var shown = rows.filter(function(x){ return x.rest>0 || x.date===date; });
+  var gross = 0, disc = 0, net = 0, paid = 0, credit = 0;
+  shown.forEach(function(x){ gross+=x.gross; disc+=x.disc; net+=x.amount; paid+=x.paidAmt; });
+  rows.forEach(function(x){ credit += x.over; });
   var mode = payModeOf(s);
   var label;
   if(dueToday && arrears)   label = "مستحق "+money(dueToday)+" · متأخر "+money(arrears);
@@ -2311,13 +2593,255 @@ function payStatus(sid, date){
   else if(arrears)          label = "متأخر "+money(arrears);
   else if(paidToday)        label = "اتدفع النهاردة "+money(paidToday);
   else                      label = "سديد";
+  var total = dueToday + arrears;
   return {
     exempt:false, mode:mode, label:label,
-    dueToday:dueToday, arrears:arrears, total:dueToday+arrears,
+    dueToday:dueToday, arrears:arrears, total:total,
     paidToday:paidToday,
-    todayRows:todayRows, oldRows:oldRows,
-    hasAny: (dueToday+arrears) > 0
+    /* الكشف المالي: الأصلي · الخصم · الصافي · المدفوع */
+    gross:gross, disc:disc, net:net, paid:paid, credit:credit,
+    st: !rows.length ? "none" : (total<=0 ? "paid" : (paid>0 ? "partial" : "unpaid")),
+    todayRows:todayRows, oldRows:oldRows, rows:shown,
+    hasAny: total > 0
   };
+}
+
+/* ============================================================
+   توزيع دفعة على المستحقات — العملية الوحيدة لتسجيل أي دفع
+
+   المدرس بيكتب المبلغ اللي استلمه فعلًا، والنظام بيوجّهه:
+     order "old"   الأقدم أولًا (الافتراضي) — المتأخرات تتقفل الأول
+     order "today" مستحق اليوم أولًا وبعده المتأخرات
+     only [ids]    مستحقات بعينها بس
+   كل جزء بيتسجّل دفعة مستقلة مربوطة بمستحقها، فدايمًا معروف
+   كل جنيه راح لأنهي مستحق. والدفعة الجزئية مبتقفلش المستحق.
+   ============================================================ */
+function payApply(sid, amount, opt){
+  opt = opt || {};
+  var d = opt.date || today();
+  var s = studentById(sid);
+  var out = { done:0, left:num(amount), alloc:[] };
+  if(!s || out.left<=0) return out;
+  var rows = finRows(sid, opt.upto || d, false).filter(function(x){ return x.rest>0; });
+  if(opt.only) rows = rows.filter(function(x){ return opt.only.indexOf(x.id)>=0; });
+  if(opt.gid)  rows = rows.filter(function(x){ return x.gid===opt.gid; });
+  if(opt.order==="today"){
+    rows = rows.filter(function(x){ return x.date===d; })
+      .concat(rows.filter(function(x){ return x.date!==d; }));
+  }
+  rows.forEach(function(x){
+    if(out.left <= 0.004) return;
+    var take = Math.min(out.left, num(x.rest));
+    if(take <= 0) return;
+    var p;
+    if(x.kind==="ses"){
+      p = payAdd({ sid:sid, gid:x.gid, amount:take, date:d, kind:"ses",
+                   dueId:x.id, dueDate:x.date, note:opt.note });
+      var due = (DB.sesDue||[]).filter(function(y){ return y.id===x.id; })[0];
+      /* العلامة القديمة للتوافق — الحقيقة في سجل الدفعات */
+      if(due && take >= num(x.rest)-0.001){ due.paid = true; due.paidAt = d; }
+    }else{
+      p = payAdd({ sid:sid, gid:x.gid, amount:take, date:d, kind:"month",
+                   mi:num(x.mi), mk:x.mk, note:opt.note });
+    }
+    out.left -= take; out.done += take;
+    out.alloc.push({ id:x.id, what:x.what, take:take, pay:p });
+  });
+  if(out.left < 0.005) out.left = 0;
+  return out;
+}
+
+/* ============================================================
+   إلغاء دفعة = عكس معاملة، مش حذف
+   الدفعة بتتنقل من السجل الفعّال لسجل الملغيات بسببها وتاريخها
+   ومين لغاها — فالرصيد بيتعاد حسابه، والأثر بيفضل موجود.
+   ============================================================ */
+function payVoid(p, reason){
+  if(!p) return null;
+  DB.pays = DB.pays.filter(function(x){ return x!==p; });
+  var v = {};
+  Object.keys(p).forEach(function(k){ v[k] = p[k]; });
+  v.voidAt = Date.now(); v.voidDate = today();
+  v.voidReason = String(reason||"").trim() || "بدون سبب";
+  v.voidBy = DB.meta.name || "المدرّس";
+  DB.voids = DB.voids || [];
+  DB.voids.push(v);
+  if(p.dueId) (DB.sesDue||[]).forEach(function(x){
+    if(x.id===p.dueId){ x.paid=false; x.paidAt=""; } });
+  setTimeout(function(){
+    queueOp("void", { gid:p.gid, date:today(), sid:p.sid, amount:p.amount }); }, 0);
+  return v;
+}
+function payById(id){
+  for(var i=0;i<DB.pays.length;i++) if(DB.pays[i].id===id) return DB.pays[i];
+  return null;
+}
+
+/* ============================================================
+   «لم يسدد» — متابعة، مش معاملة مالية
+   المدرس سأل والطالب مدفعش. بنسجّل ده بتاريخه وسببه وموعد
+   السداد الموعود، من غير ما نلمس الرصيد ولا ننشئ مستحق جديد.
+   ============================================================ */
+function noPayOf(sid, date, gid){
+  var L = (DB.payNotes||[]).filter(function(n){
+    return n.sid===sid && n.date===date && (!gid || !n.gid || n.gid===gid); });
+  return L.length ? L[L.length-1] : null;
+}
+
+/* ============================================================
+   تحصيل يوم — صف لكل طالب في كل مجموعة
+   بيتبني من نفس المستحقات والدفعات (مفيش مصدر بيانات تاني).
+
+   الكشف في الصف بيغطي: مستحقات اليوم + المتأخرات اللي كانت
+   مفتوحة أول اليوم. فدايمًا:
+       الصافي − المدفوع سابقًا − دفعات اليوم = المتبقي
+   ============================================================ */
+function collectRows(d){
+  d = d || today();
+  var out = [];
+  DB.groups.forEach(function(g){
+    if(g.status==="off") return;
+    groupStudents(g.id).forEach(function(s){
+      if(isExemptOn(s, d)) return;                 /* المعفي بره التحصيل */
+      var rows = duesOf(s.id, d).filter(function(x){ return x.gid===g.id; });
+      var pd = DB.pays.filter(function(p){ return p.sid===s.id && p.gid===g.id && p.date===d; });
+      var paidToday = pd.reduce(function(a,p){ return a+num(p.amount); }, 0);
+      /* دفعات اليوم على كل مستحق */
+      function todayOn(R){
+        return paysOfRow(R).reduce(function(a,p){ return a + (p.date===d ? num(p.amount) : 0); }, 0);
+      }
+      var shown = [];
+      rows.forEach(function(R){
+        var t = todayOn(R);
+        if(R.date===d || R.rest>0 || t>0){ R.todayPaid = t; shown.push(R); }
+      });
+      if(!shown.length && !paidToday) return;
+      var r = { s:s, g:g, mode:payModeOf(s), rows:shown,
+                gross:0, disc:0, net:0, paidBefore:0, paidToday:paidToday, rest:0,
+                dueTodayNet:0, dueTodayRest:0, arrearsBefore:0, arrears:0,
+                needBefore:0, discToday:0 };
+      shown.forEach(function(R){
+        r.gross += R.gross; r.disc += R.disc; r.net += R.amount;
+        r.paidBefore += Math.max(0, R.paidAmt - R.todayPaid);
+        r.rest += R.rest;
+        if(R.date===d){ r.dueTodayNet += R.amount; r.dueTodayRest += R.rest; r.discToday += R.disc; }
+        else{ r.arrears += R.rest;
+              r.arrearsBefore += Math.max(0, R.amount - Math.max(0, R.paidAmt - R.todayPaid)); }
+      });
+      /* المطلوب قبل دفعات اليوم = متأخرات سابقة + مستحق اليوم */
+      r.needBefore = Math.max(0, r.net - r.paidBefore);
+      r.st = r.net<=0 ? "none"
+           : (r.rest<=0 ? "paid" : ((r.paidBefore+r.paidToday)>0 ? "partial" : "unpaid"));
+      r.asked = noPayOf(s.id, d, g.id);
+      out.push(r);
+    });
+  });
+  return out;
+}
+function collectSummary(d){
+  d = d || today();
+  var rows = collectRows(d);
+  var S = { date:d, rows:rows, dueToday:0, got:0, restToday:0, arrearsBefore:0, arrears:0,
+            needBefore:0, rest:0, disc:0, discToday:0, gross:0, net:0,
+            nPaid:0, nPartial:0, nUnpaid:0, nStu:0 };
+  var by = {};
+  rows.forEach(function(r){
+    S.dueToday += r.dueTodayNet; S.restToday += r.dueTodayRest;
+    S.arrearsBefore += r.arrearsBefore; S.arrears += r.arrears;
+    S.needBefore += r.needBefore; S.rest += r.rest;
+    S.disc += r.disc; S.discToday += r.discToday; S.gross += r.gross; S.net += r.net;
+    S.got += r.paidToday;
+    var b = by[r.s.id] = by[r.s.id] || { net:0, rest:0, paid:0 };
+    b.net += r.net; b.rest += r.rest; b.paid += r.paidBefore + r.paidToday;
+  });
+  Object.keys(by).forEach(function(k){
+    var b = by[k];
+    if(b.net<=0) return;
+    S.nStu++;
+    if(b.rest<=0) S.nPaid++; else if(b.paid>0) S.nPartial++; else S.nUnpaid++;
+  });
+  /* كل اللي اتحصّل في اليوم — حتى لو من طالب خرج من مجموعته */
+  S.gotAll = 0;
+  DB.pays.forEach(function(p){ if(p.date===d) S.gotAll += num(p.amount); });
+  return S;
+}
+
+/* ============================================================
+   التقرير المالي — إجمالي كل مجموعة لحد النهاردة
+   ============================================================ */
+function finGroupTotals(date){
+  date = date || today();
+  var out = [], T = { gross:0, disc:0, net:0, paid:0, rest:0, n:0 };
+  DB.groups.forEach(function(g){
+    if(g.status==="off") return;
+    var o = { g:g, gross:0, disc:0, net:0, paid:0, rest:0, n:0, late:0, free:0 };
+    groupStudents(g.id).forEach(function(s){
+      if(isExemptOn(s, date)){ o.free++; return; }
+      o.n++;
+      var r0 = 0;
+      duesOf(s.id, date).forEach(function(R){
+        if(R.gid!==g.id) return;
+        o.gross += R.gross; o.disc += R.disc; o.net += R.amount;
+        o.paid += Math.min(R.paidAmt, R.amount); o.rest += R.rest; r0 += R.rest;
+      });
+      if(r0>0) o.late++;
+    });
+    T.gross+=o.gross; T.disc+=o.disc; T.net+=o.net; T.paid+=o.paid; T.rest+=o.rest; T.n+=o.n;
+    out.push(o);
+  });
+  return { rows:out, total:T };
+}
+
+/* ============================================================
+   كشف حساب الأسرة — كل ابن بمستحقه وخصمه ومدفوعه ومتبقيه
+   ============================================================ */
+function famStatement(fid, date){
+  var out = { kids:[], gross:0, disc:0, net:0, paid:0, rest:0 };
+  famStudents(fid).forEach(function(s){
+    var F = finSummary(s.id, date);
+    out.kids.push({ s:s, F:F });
+    out.gross+=F.gross; out.disc+=F.disc; out.net+=F.net; out.paid+=F.paid; out.rest+=F.rest;
+  });
+  return out;
+}
+function famDiscs(fid){
+  return (DB.discounts||[]).filter(function(dc){ return dc.scope==="fam" && dc.famId===fid && !dc.off; })
+    .sort(function(a,b){ return (b.at||0)-(a.at||0); });
+}
+/* توزيع مبلغ للأسرة كلها على الأبناء — جنيهات صحيحة ومجموعها = المبلغ بالظبط */
+function famSplit(total, sids){
+  var n = sids.length, sh = {};
+  if(!n) return sh;
+  total = Math.max(0, Math.round(num(total)));
+  var base = Math.floor(total/n), extra = total - base*n;
+  sids.forEach(function(id, i){ sh[id] = base + (i < extra ? 1 : 0); });
+  return sh;
+}
+/* طالب خرج من أسرته: خصم الأسرة اللي كان بياخده بيتثبّت على
+   مستحقاته القديمة كخصم فردي منتهي — فالحساب القديم مبيتغيّرش. */
+function famLeave(s, oldFid){
+  if(!oldFid) return 0;
+  var y = new Date(); y.setDate(y.getDate()-1);
+  var end = iso(y), n = 0;
+  (DB.discounts||[]).slice().forEach(function(dc){
+    if(dc.scope!=="fam" || dc.famId!==oldFid || dc.off) return;
+    var from = dc.from||"";
+    if(s.famSince && s.famSince > from) from = s.famSince;
+    var to = dc.to && dc.to < end ? dc.to : end;
+    if(from && to < from && !(dc.incl||[]).length) return;
+    var v = dc.type==="total" ? num((dc.shares||{})[s.id]) : num(dc.value);
+    if(v<=0) return;
+    DB.discounts.push({ id:uid("dc"), scope:"stu", sid:s.id,
+      type: dc.type==="pct" ? "pct" : "fixed", value:v, per:dc.per||"month",
+      repeat:dc.repeat||"monthly", dueId:dc.dueId||"", from:from, to:to,
+      incl:(dc.incl||[]).filter(function(k){ return String(k).indexOf(s.id+":")===0; })
+            .map(function(k){ return String(k).slice(s.id.length+1); }),
+      gid:"", stack:false,
+      reason:"خصم أسرة سابق", note:"اتثبّت تلقائيًا عند خروج الطالب من الأسرة",
+      at:Date.now(), by:DB.meta.name||"المدرّس", auto:true });
+    n++;
+  });
+  return n;
 }
 
 /* ============================================================
@@ -2358,7 +2882,7 @@ function groupsDueToday(){
       duesOf(s.id, t).forEach(function(d){
         if(d.gid!==g.id || d.date!==t) return;
         need += num(d.amount);
-        if(!d.rest) got += num(d.amount);
+        got += Math.min(num(d.paidAmt), num(d.amount));   /* الجزئي محسوب */
         cnt++;
       });
     });
@@ -2475,17 +2999,15 @@ function monthIdxOf(mk){ return num(String(mk).split("-")[1], 1); }
 /* المستحق الشهري لشهر واحد بس */
 function monthDue(s, g, mk){
   if(payModeOf(s)!=="month") return null;
-  var mi = monthIdxOf(mk);
-  /* المستحق الشهري لشهر واحد بس — وجوه نافذة الاحتساب */
-  var from = billFrom(s, g);
-  if(!from) return null;
-  if(mk < String(from).slice(0,7)) return null;
-  var payday = Math.min(28, Math.max(1, num(g.payday,1)));
-  var dueDate = mk+"-"+String(payday).padStart(2,"0");
-  if(dueDate < from) return null;
-  var pA = paidForMonth(s.id, g.id, mi);
-  return { mi:mi, amount:num(g.fee), paidAmt:pA,
-           paid: pA >= num(g.fee)-0.001 };
+  /* من نفس مصدر المستحقات — فالخصم والمدفوع متطابقين مع كل الشاشات */
+  var rows = finRows(s.id, mk+"-31", true);
+  for(var i=0;i<rows.length;i++){
+    var R = rows[i];
+    if(R.kind==="month" && R.gid===g.id && R.mk===mk)
+      return { mi:R.mi, amount:R.amount, gross:R.gross, disc:R.disc,
+               paidAmt:R.paidAmt, paid:R.paid, rest:R.rest, id:R.id };
+  }
+  return null;
 }
 /* تاريخ بداية اشتراك الطالب بصيغة سنة-شهر */
 function joinMonthKey(s){
@@ -2515,10 +3037,10 @@ function payStateOf(s, g, mk){
   if(mode==="free") return { mode:"free", label:"معفي", cls:"", due:0, paid:0, rest:0, n:0 };
   if(mode==="ses"){
     var rows = sesDuesMonth(s.id, g.id, mk);
-    var paid = rows.filter(function(x){ return duePaid(x); });
-    var rest = rows.filter(function(x){ return !duePaid(x); });
-    var paidAmt = rows.reduce(function(a,x){ return a+paidForDue(x.id); }, 0);
-    var restAmt = rows.reduce(function(a,x){ return a+dueRest(x); }, 0);
+    var paid = rows.filter(function(x){ return x.rest<=0; });
+    var rest = rows.filter(function(x){ return x.rest>0; });
+    var paidAmt = rows.reduce(function(a,x){ return a+Math.min(num(x.paidAmt), num(x.amount)); }, 0);
+    var restAmt = rows.reduce(function(a,x){ return a+num(x.rest); }, 0);
     return { mode:"ses",
       label: !rows.length ? "مفيش حصص"
            : (rest.length ? ar(rest.length)+" حصة متأخرة" : "سديد"),
@@ -2579,9 +3101,9 @@ function lateDetail(s, g, mk){
   if(st.mode==="free") return rows;
   if(st.mode==="ses"){
     (st.rows||[]).forEach(function(x){
-      if(x.paid) return;
+      if(x.rest<=0) return;
       rows.push({ what:"حصة "+fmtD(x.date), day:DAYS[dowOf(x.date)],
-                  date:x.date, amount:num(x.amount) });
+                  date:x.date, amount:num(x.rest) });
     });
   }else if(st.rest){
     rows.push({ what:MONTHS[st.mi-1]||"", day:"", date:"", amount:st.rest });
@@ -2592,10 +3114,10 @@ function lateDetail(s, g, mk){
 /* حصص الطالب في مجموعة بالحصة */
 function sesDuesOf(sid, gid){
   var s = studentById(sid);
-  return (DB.sesDue||[]).filter(function(x){
-    if(x.sid!==sid) return false;
-    if(gid && x.gid!==gid) return false;
-    return billEligible(s, groupById(x.gid), x.date);
+  if(!s || payModeOf(s)!=="ses") return [];
+  /* صفوف جاهزة: الأصلي والخصم والصافي والمدفوع والمتبقي */
+  return finRows(sid, "9999-12-31", true).filter(function(x){
+    return x.kind==="ses" && (!gid || x.gid===gid);
   }).sort(function(a,b){ return String(b.date).localeCompare(String(a.date)); });
 }
 function toggleSesDue(id){
@@ -2608,15 +3130,11 @@ function toggleSesDue(id){
 }
 /* مستحق حصص الطالب (للمجموعات اللي بالحصة) */
 function sesDueOf(sid){
-  var s = studentById(sid);
-  var due=0, paid=0;
-  (DB.sesDue||[]).forEach(function(x){
-    if(x.sid!==sid) return;
-    if(!billEligible(s, groupById(x.gid), x.date)) return;
-    due += num(x.amount);
-    if(duePaid(x)) paid += num(x.amount);
+  var due=0, paid=0, rest=0;
+  sesDuesOf(sid).forEach(function(x){
+    due += num(x.amount); paid += Math.min(num(x.paidAmt), num(x.amount)); rest += num(x.rest);
   });
-  return { due:due, paid:paid, rest:Math.max(0,due-paid) };
+  return { due:due, paid:paid, rest:rest };
 }
 function sesOf(gid, d){ return DB.sessions[sesKey(gid,d)] || null; }
 function attOf(gid, d, sid){ var s = sesOf(gid,d); return s ? (s.att||{})[sid] : undefined; }
@@ -2658,7 +3176,8 @@ function sesEligibility(sid, gid, date){
   var due = (DB.sesDue||[]).filter(function(x){
     return x.sid===sid && x.gid===gid && x.date===date; })[0] || null;
   var paidAmt = due ? paidForDue(due.id) : 0;
-  var amount  = due ? num(due.amount) : num(g.fee);
+  /* الصافي بعد الخصم — فمستحق اتخصم بالكامل مايتحسبش «لسه مدفعش» */
+  var amount  = due ? dueNet(due) : num(g.fee);
 
   /* المفروض يبقى عليه مستحق للحصة دي؟ */
   var should = (mode==="ses") && !ex && bill && (att==="present");
@@ -2723,7 +3242,8 @@ function sesDueDrop(sid, gid, d){
   if(!due) return 0;
   var gone = 0;
   DB.pays.slice().forEach(function(p){
-    if(p.kind==="ses" && p.dueId===due.id){ gone += num(p.amount); payDel(p); }
+    if(p.kind==="ses" && p.dueId===due.id){
+      gone += num(p.amount); payDel(p, "الطالب اتسجّل غايب عن الحصة"); }
   });
   DB.sesDue = (DB.sesDue||[]).filter(function(x){ return x.id !== due.id; });
   return gone;
@@ -2745,31 +3265,10 @@ function markPay(sid, gid, d, amount){
   var s = studentById(sid), g = groupById(gid);
   if(!s || !g) return 0;
   if(isExemptOn(s, d)) return 0;                 /* المعفي بره */
-  var dues = duesOf(sid, d).filter(function(x){ return x.date<=d && x.rest>0; });
-  if(!dues.length) return 0;                     /* مفيش مستحق */
-  var left = (amount===undefined)
-    ? dues.reduce(function(a,x){ return a+num(x.rest); }, 0)
-    : num(amount);
-  var done = 0;
-  dues.forEach(function(x){
-    if(left <= 0) return;
-    var take = Math.min(left, num(x.rest));
-    if(take <= 0) return;
-    if(x.kind === "ses"){
-      var due = (DB.sesDue||[]).filter(function(y){ return y.id===x.id; })[0];
-      if(!due) return;
-      /* حماية من التكرار: نفس المستحق مايتدفعش مرتين بالزيادة */
-      if(paidForDue(due.id) >= num(due.amount) - 0.001) return;
-      payAdd({ sid:sid, gid:x.gid, amount:take, date:d,
-               kind:"ses", dueId:due.id, dueDate:due.date });
-      if(paidForDue(due.id) >= num(due.amount)-0.001){ due.paid=true; due.paidAt=d; }
-    }else{
-      if(paidForMonth(sid, x.gid, num(x.mi)) >= num(x.amount) - 0.001) return;
-      payAdd({ sid:sid, gid:x.gid, amount:take, mi:num(x.mi), kind:"month", date:d });
-    }
-    left -= take; done += take;
-  });
-  return done;
+  var rest = duesOf(sid, d).reduce(function(a,x){ return a+num(x.rest); }, 0);
+  if(rest <= 0) return 0;                        /* مفيش مستحق */
+  /* نفس عملية التوزيع بتاعت نافذة الدفع — الأقدم أولًا */
+  return payApply(sid, amount===undefined ? rest : num(amount), { date:d, upto:d }).done;
 }
 /* تسجيل واجب — نفس المنطق */
 function markHw(gid, d, sid, v){
@@ -2938,6 +3437,7 @@ var UI = { tab:"home", sub:null, q:"", gid:"", date:"" };
 var NAV = [
   { g:"يوميًا", items:[
     { id:"home",   n:"لوحة اليوم",        i:"◉" },
+    { id:"collect",n:"تحصيل النهاردة",     i:"₤" },
     { id:"sesh",   n:"سجل الحصص",         i:"◫" },
     { id:"qr",     n:"أكواد الطلاب و QR",  i:"▣" }
   ]},
@@ -3127,6 +3627,7 @@ function _render(){
   else if(UI.tab==="groups") h = viewGroups();
   else if(UI.tab==="studs")  h = viewStudents();
   else if(UI.tab==="money")  h = viewMoney();
+  else if(UI.tab==="collect") h = viewCollect();
   else if(UI.tab==="more")   { UI.tab="home"; h = viewHome(); }
   else if(UI.tab==="book")   h = viewBookings();
   else if(UI.tab==="comm")   h = (UI.sub && UI.sub.c) ? viewComm(UI.sub.c) : viewComms();
@@ -3187,8 +3688,8 @@ function back(label, act){
 function viewHome(){
   var d = UI.date || today();
   var gs = groupToday(d);
-  var late = lateStudents();
   var curM = new Date().getMonth()+1;
+  var CS = collectSummary(d);      /* تحصيل اليوم — نفس أرقام شاشة التحصيل */
   var h = pageHd("لوحة اليوم", esc(DAYS[dowOf(d)])+" · "+fmtD(d),
     '<button class="btn sm" data-act="newGroup">+ مجموعة</button>');
 
@@ -3223,8 +3724,11 @@ function viewHome(){
     stat("حصص النهاردة", ar(gs.length),
          gs.length? ("خلص "+ar(doneN)+" من "+ar(gs.length)) : "مفيش حصص",
          (gs.length && doneN===gs.length) ? "money" : "acc") +
-    stat("تحصيل النهاردة", money(todayIn),
-         MONTHS[curM-1]+": "+money(monthIncome(curM)), "money") +
+    '<button class="stat money" data-act="openCollect" '+
+      'style="border:1px solid var(--line);cursor:pointer;text-align:right;font:inherit">'+
+      '<div class="k">تحصيل النهاردة</div><div class="v">'+money(todayIn)+'</div>'+
+      '<div class="s">'+esc(MONTHS[curM-1])+': '+money(monthIncome(curM))+' · اضغط للتحصيل</div>'+
+    '</button>'+
     '<button class="stat'+(D.todaySum?" late":"")+'" data-act="duesToday" '+
       'style="border:1px solid var(--line);cursor:pointer;text-align:right;font:inherit">'+
       '<div class="k">مستحق النهاردة</div>'+
@@ -3352,20 +3856,24 @@ function viewHome(){
   }
   h += '</div></div>';
 
-  /* المتأخرين */
-  if(late.length){
-    h += '<div class="card"><div class="hd"><h3>متأخرين في الدفع</h3>'+
-      '<span class="tag bad">'+ar(late.length)+'</span></div><div class="bd flush">';
-    late.slice(0,6).forEach(function(s){
-      var due = studentDue(s);
-      h += '<button class="item" data-act="openStu" data-s="'+s.id+'">'+
-        '<span class="av b">'+esc(initials(s.name))+'</span>'+
-        '<span class="tx"><b>'+esc(s.name)+'</b><small>'+
-          esc(studentGroups(s).map(function(g){ return g.name; }).join(" · ")||"مفيش مجموعات")+'</small></span>'+
-        '<span class="tag bad">'+money(due.rest)+'</span><span class="chev">‹</span></button>';
-    });
-    if(late.length>6) h += '<button class="item" data-act="tab" data-t="money">'+
-      '<span class="tx mut" style="text-align:center">…وكمان '+ar(late.length-6)+' — شوف كل المتأخرات</span></button>';
+  /* ============================================================
+     تحصيل اليوم — كشف مالي واضح لكل طالب عليه فلوس، بنفس أزرار
+     شاشة التحصيل (سداد المتبقي · سداد جزء · لم يسدد · السجل).
+     ============================================================ */
+  var owing = CS.rows.filter(function(r){ return r.rest>0; })
+    .sort(function(a,b){ return (b.dueTodayRest-a.dueTodayRest) || (b.rest-a.rest); });
+  if(CS.rows.length){
+    h += '<div class="card"><div class="hd"><h3>'+(d===today()? "تحصيل النهاردة" : "تحصيل "+fmtD(d))+'</h3>'+
+      '<span class="tag '+(CS.rest?"bad":"ok")+'">'+(CS.rest? "متبقي "+money(CS.rest) : "اتحصّل كله")+'</span>'+
+      '<button class="btn sm" data-act="openCollect">افتح التحصيل</button></div><div class="bd flush">'+
+      '<div class="mut" style="font-size:12px;padding:8px 14px;border-bottom:1px solid var(--line2);background:var(--paper)">'+
+        'مستحق اليوم <b>'+money(CS.dueToday)+'</b> · متأخرات سابقة <b>'+money(CS.arrearsBefore)+
+        '</b> · اتحصّل <b>'+money(CS.gotAll)+'</b> · بالكامل '+ar(CS.nPaid)+' · جزء '+ar(CS.nPartial)+
+        ' · لم يدفع '+ar(CS.nUnpaid)+(CS.disc? ' · خصومات <b>'+money(CS.disc)+'</b>' : '')+'</div>';
+    owing.slice(0,5).forEach(function(r){ h += collectRowHTML(r, d); });
+    if(owing.length>5) h += '<button class="item" data-act="openCollect">'+
+      '<span class="tx mut" style="text-align:center">…وكمان '+ar(owing.length-5)+' طالب — افتح شاشة التحصيل</span></button>';
+    if(!owing.length) h += '<div class="empty" style="padding:20px"><b>كل المطلوب اتحصّل ✓</b></div>';
     h += '</div></div>';
   }
   if(!DB.groups.length) h += firstRun();
@@ -3414,7 +3922,7 @@ function viewGroup(gid){
   var st = groupStudents(gid);
   var h = back("المجموعات","backGroups");
   h += pageHd(g.name,
-    (g.days||[]).map(function(d){ return DAYS[d]; }).join(" · ')+' ") + " " + esc(g.time||""),
+    esc((g.days||[]).map(function(d){ return DAYS[d]; }).join(" · ")) + " " + esc(g.time||""),
     '<button class="btn ghost sm" data-act="printCodes" data-g="'+gid+
       '">▣ طباعة الأكواد</button>'+
     '<button class="btn ghost sm" data-act="editGroup" data-g="'+gid+'">تعديل</button>'+
@@ -3511,9 +4019,17 @@ function viewGroup(gid){
                   '<b style="color:var(--bad)">متأخر '+money(P.arrears)+'</b>' : '')+
                 ((P.dueToday&&P.arrears)? ' · الإجمالي '+money(P.total) : ''))+
             '</small></span>'+
-          '<span class="tag '+(P.exempt?"ok":(P.total?"bad":"ok"))+'">'+
-            (P.exempt? "معفي" : (P.total? money(P.total) : "سديد"))+'</span>'+
+          (P.exempt ? '<span class="tag ok">معفي</span>' : stTag(P.st))+
         '</div>'+
+        /* الكشف المالي — بيظهر لأي طالب عليه متبقي أو له خصم */
+        (!P.exempt && (P.total>0 || P.disc>0)
+          ? '<div style="width:100%;padding-inline-start:47px">'+finGrid([
+              ["المستحق الأصلي", money(P.gross)],
+              ["الخصم", discCell(P.disc), P.disc? "warn":""],
+              ["صافي المستحق", money(P.net)],
+              ["المدفوع", money(P.paid), P.paid? "ok":""],
+              ["المتبقي", money(P.total), P.total? "bad":"ok"]
+            ])+'</div>' : '')+
         /* السطر الثاني: الأزرار */
         '<div style="display:flex;gap:6px;width:100%;flex-wrap:wrap;padding-inline-start:47px">'+
           /* الحضور */
@@ -3535,16 +4051,10 @@ function viewGroup(gid){
               '" data-d="'+d0+'" data-s="'+s.id+'" style="padding:7px 11px'+extra+'">'+
               esc(S ? S.n : "واجب")+'</button>';
           })()+
-          /* الدفع */
+          /* الدفع — نفس الأزرار في كل الشاشات */
           (P.exempt
             ? '<span class="tag ok" style="padding:8px 12px">★ معفي من الدفع</span>'
-            : (P.total
-              ? '<button class="btn ok sm" data-act="payNow" data-g="'+gid+'" data-s="'+s.id+
-                '" data-d="'+d0+'" style="padding:7px 11px">₤ دفع '+money(P.total)+'</button>'
-              : (P.paidToday
-                ? '<button class="btn ghost sm" data-act="payNow" data-g="'+gid+'" data-s="'+s.id+
-                  '" data-d="'+d0+'" style="padding:7px 11px;color:var(--ok)">✓ مدفوع</button>'
-                : '')))+
+            : payBar(s, { gid:gid, d:d0, rest:P.total, paidToday:P.paidToday, mode:"mini", wa:true }))+
           /* رسالة الغياب */
           (att==="A" && contactOf(s)
             ? '<button class="btn sm" data-act="waAbsent" data-s="'+s.id+'" data-g="'+gid+
@@ -3739,11 +4249,8 @@ function viewStudent(sid){
     (contactOf(s)? '<a class="btn ghost sm" href="tel:'+esc(contactOf(s))+'" style="text-decoration:none">☎ اتصال</a>':'')+
     '<button class="btn ghost sm" data-act="stuReport" data-s="'+sid+'">▦ تقرير شامل</button>');
 
-  if(!_ex) h += '<div class="stats">'+
-    stat("المستحق", money(d.due), "من أول اشتراكه", "")+
-    stat("المدفوع", money(d.paid), "", "money")+
-    stat("المتبقي", money(d.rest), d.rest? "متأخر" : "سديد", d.rest?"late":"")+
-  '</div>';
+  /* الكشف المالي: الأصلي · الخصم · الصافي · المدفوع · المتبقي + أزرار السداد */
+  if(!_ex) h += finCardHTML(s);
 
   /* مستوى الطالب من امتحاناته */
   var lv = studentLevel(sid), tr = taskRate(sid);
@@ -3766,69 +4273,54 @@ function viewStudent(sid){
       '<div style="margin-top:8px"><button class="btn sm" data-act="editStu" data-s="'+sid+'">حطّه في مجموعة</button></div></div>';
   }
 
-  /* ============ شريط الشهور لكل مجموعة ============ */
+  /* ============ حساب كل مجموعة ============
+     العرض حسب نظام دفع **الطالب**: بالحصة = قايمة حصصه،
+     بالشهر = شريط الشهور. وكل خانة بتفتح نافذة الدفع بتاعة
+     المستحق ده — مفيش تسجيل ولا إلغاء بضغطة واحدة بالغلط. */
   gs.forEach(function(g){
-    /* ============================================================
-       المجموعة اللي بالحصة ليها عرض مختلف تمامًا: قائمة حصص
-       بتاريخها وسعرها، مش شريط شهور. شريط الشهور كان بيظهر لها
-       غلط فيبان كأنها بتتحاسب بالشهر.
-       ============================================================ */
-    if(g.mode==="ses"){
+    var a = attStats(s.id, g.id);
+    if(_pm==="ses"){
       var dues = sesDuesOf(s.id, g.id);
-      var dRest = dues.filter(function(x){ return !duePaid(x); });
-      var dPaid = dues.filter(function(x){ return duePaid(x); });
+      var dRest = dues.filter(function(x){ return x.rest>0; });
       h += '<div class="card"><div class="hd"><h3>'+esc(g.name)+'</h3>'+
         '<span class="tag warn">بالحصة · '+money(g.fee)+'</span></div><div class="bd">';
       if(!dues.length){
-        h += '<div class="note">لسه مفيش حصص متسجّلة. المستحق بيتسجّل أول ما '+
-          '<b>تنهي الحصة</b> من لوحة اليوم.</div>';
+        h += '<div class="note">لسه مفيش حصص متسجّلة. المستحق بيتسجّل لما الطالب '+
+          '<b>يتسجّل حاضر</b> في الحصة.</div>';
       }else{
         h += '<div class="stats" style="margin-bottom:10px">'+
-          stat("حصص حضرها", ar(dues.length), "", "")+
-          stat("مدفوع", money(dPaid.reduce(function(a2,x){ return a2+num(x.amount); },0)), "", "money")+
-          stat("متبقي", money(dRest.reduce(function(a2,x){ return a2+num(x.amount); },0)),
+          stat("حصص حضرها", ar(dues.length), a.tot? "الحضور "+ar(a.rate)+"٪" : "", "")+
+          stat("مدفوع", money(dues.reduce(function(a2,x){ return a2+Math.min(num(x.paidAmt),num(x.amount)); },0)), "", "money")+
+          stat("متبقي", money(dRest.reduce(function(a2,x){ return a2+num(x.rest); },0)),
                dRest.length? ar(dRest.length)+" حصة":"", dRest.length?"late":"")+
         '</div>'+
-        '<div class="mut" style="font-size:12px;margin-bottom:7px">دوس على الحصة لتسجيل الدفع أو إلغاؤه</div>';
+        '<div class="mut" style="font-size:12px;margin-bottom:7px">دوس على الحصة عشان تسدّدها أو تشوف دفعاتها</div>';
         if(dRest.length>1)
           h += '<button class="btn ok block" data-act="paySesAll" data-s="'+s.id+'" data-g="'+g.id+
-            '" style="margin-bottom:9px">✓ سدّد كل الحصص ('+money(dRest.reduce(function(a2,x){ return a2+num(x.amount); },0))+')</button>';
+            '" style="margin-bottom:9px">✓ سدّد كل الحصص ('+money(dRest.reduce(function(a2,x){ return a2+num(x.rest); },0))+')</button>';
         h += '<div style="border:1px solid var(--line);border-radius:11px;overflow:hidden">'+
           dues.slice(0,20).map(function(x){
-            var _p = payOfDue(x.id);
-            return '<button class="item" data-act="paySes" data-i="'+x.id+'" style="padding:10px 12px">'+
-              '<span class="av'+(_p?" g":" b")+'">'+(_p?"✓":"—")+'</span>'+
+            return '<button class="item" data-act="payOne" data-s="'+s.id+'" data-i="'+esc(x.id)+'" style="padding:10px 12px">'+
+              '<span class="av'+(x.rest<=0?" g":(x.paidAmt>0?" w":" b"))+'">'+(x.rest<=0?"✓":(x.paidAmt>0?"◔":"—"))+'</span>'+
               '<span class="tx"><b>'+fmtD(x.date)+'</b><small>'+
-                esc(DAYS[dowOf(x.date)])+(_p? " · اتدفعت "+fmtD(_p.date):"")+'</small></span>'+
-              '<span class="tag '+(_p?"ok":"bad")+'">'+money(x.amount)+'</span></button>';
+                esc(DAYS[dowOf(x.date)])+
+                (x.disc? " · خصم "+money(x.disc) : "")+
+                (x.paidAmt? " · اتدفع "+money(x.paidAmt) : "")+'</small></span>'+
+              '<span class="tag '+(x.rest<=0?"ok":(x.paidAmt>0?"warn":"bad"))+'">'+
+                (x.rest>0 ? "باقي "+money(x.rest) : money(x.amount))+'</span></button>';
           }).join("")+'</div>';
         if(dues.length>20) h += '<div class="mut" style="font-size:12px;margin-top:6px;text-align:center">'+
-          '…وكمان '+ar(dues.length-20)+' حصة</div>';
+          '…وكمان '+ar(dues.length-20)+' حصة — شوفهم في سجل المدفوعات</div>';
       }
       h += '</div></div>';
       return;
     }
-    var due = dueMonths(s,g);
-    var a = attStats(s.id, g.id);
     h += '<div class="card"><div class="hd"><h3>'+esc(g.name)+'</h3>'+
       '<span class="tag">'+money(g.fee)+'/شهر</span></div><div class="bd">'+
       '<div class="mut" style="font-size:12px;margin-bottom:7px">'+
-        'دوس على الشهر عشان تسجّل الدفع أو تلغيه'+
+        'دوس على الشهر عشان تسدّده (كامل أو جزء) أو تشوف دفعاته'+
         (a.tot? ' · الحضور '+ar(a.rate)+'٪' : '')+'</div>'+
-      '<div class="months">'+
-      schoolMonths().map(function(mi){
-        var paid = isPaid(s.id,g.id,mi);
-        var isDue = due.indexOf(mi)>=0;
-        var cls = paid ? "paid" : (isDue ? "due" : "next");
-        return '<button class="mo '+cls+'" data-act="togglePay" data-s="'+s.id+'" data-g="'+g.id+
-          '" data-m="'+mi+'" title="'+esc(MONTHS[mi-1])+(paid?" — مدفوع":(isDue?" — متأخر":" — لسه"))+'">'+
-          ar(mi)+'</button>';
-      }).join("")+'</div>'+
-      '<div style="display:flex;gap:9px;flex-wrap:wrap;margin-top:9px;font-size:11.5px" class="mut">'+
-        '<span><span class="mo paid" style="width:12px;height:12px;display:inline-block;vertical-align:-2px"></span> مدفوع</span>'+
-        '<span><span class="mo due" style="width:12px;height:12px;display:inline-block;vertical-align:-2px"></span> متأخر</span>'+
-        '<span><span class="mo next" style="width:12px;height:12px;display:inline-block;vertical-align:-2px"></span> لسه ما جاش</span>'+
-      '</div></div></div>';
+      monthStripHTML(s, g)+'</div></div>';
   });
 
   /* ============================================================
@@ -3961,19 +4453,27 @@ function viewStudent(sid){
     h += '</div></div>';
   }
 
-  /* سجل الدفعات */
+  /* سجل الدفعات — كل دفعة سجل مستقل بتاريخها والمستحق اللي راحت له */
   var mine = DB.pays.filter(function(p){ return p.sid===sid; })
     .sort(function(a,b){ return (b.at||0)-(a.at||0); });
-  if(mine.length){
+  var myVoids = (DB.voids||[]).filter(function(v){ return v.sid===sid; });
+  if(mine.length || myVoids.length){
     h += '<div class="card"><div class="hd"><h3>سجل الدفعات</h3>'+
+      '<button class="btn ghost sm" data-act="ledger" data-s="'+sid+'">☰ الكشف الكامل</button>'+
       '<button class="btn ghost sm" data-act="printStu" data-s="'+sid+'">⎙ إيصال</button></div><div class="bd flush">';
     mine.slice(0,12).forEach(function(p){
-      var g = groupById(p.gid);
-      h += '<div class="item" style="cursor:default"><span class="av">✓</span>'+
-        '<span class="tx"><b>'+esc(MONTHS[p.mi-1])+' — '+esc(g?g.name:"—")+'</b>'+
-        '<small>'+fmtD(p.date)+'</small></span>'+
-        '<span class="tag ok">'+money(p.amount)+'</span></div>';
+      h += '<div class="item" style="cursor:default"><span class="av g">✓</span>'+
+        '<span class="tx"><b>'+esc(payWhat(p))+'</b>'+
+        '<small>'+fmtD(p.date)+(p.note? ' · '+esc(p.note) : '')+'</small></span>'+
+        '<span class="tag ok">'+money(p.amount)+'</span>'+
+        '<button class="btn ghost sm" data-act="voidAsk" data-p="'+p.id+'" '+
+          'style="padding:4px 9px;font-size:11.5px;color:var(--bad);flex:0 0 auto">إلغاء</button></div>';
     });
+    if(mine.length>12) h += '<button class="item" data-act="ledger" data-s="'+sid+'">'+
+      '<span class="tx mut" style="text-align:center">…وكمان '+ar(mine.length-12)+' دفعة — افتح الكشف الكامل</span></button>';
+    if(myVoids.length) h += '<button class="item" data-act="ledger" data-s="'+sid+'">'+
+      '<span class="av b">↩</span><span class="tx"><b>'+ar(myVoids.length)+' معاملة ملغاة</b>'+
+      '<small>محفوظة بسببها وتاريخها — افتح الكشف الكامل</small></span><span class="chev">‹</span></button>';
     h += '</div></div>';
   }
   return h;
@@ -4497,30 +4997,81 @@ function viewFamilies(){
 function viewFamily(fid){
   var f = famById(fid);
   if(!f){ UI.sub=null; return viewFamilies(); }
-  var kids = famStudents(fid), d = famDue(f);
+  var kids = famStudents(fid), FS = famStatement(fid);
+  var anyPhone = !!waNum(f.phone) || kids.some(function(s){ return !!waNum(s.guardPhone); });
   var h = back("الأسر","backFams");
   h += pageHd(f.name, esc([f.guard, f.phone].filter(Boolean).join(" · ")),
     '<button class="btn ghost sm" data-act="editFam" data-f="'+fid+'">تعديل</button>'+
-    (f.phone? '<button class="btn sm" data-act="waFam" data-f="'+fid+'">✆ واتساب</button>':''));
+    '<button class="btn ghost sm" data-act="famDisc" data-f="'+fid+'">٪ خصم الأسرة</button>'+
+    (anyPhone? '<button class="btn wa sm" data-act="waFam" data-f="'+fid+'">✆ واتساب</button>':''));
   h += '<div class="stats">'+
-    stat("الأبناء", ar(kids.length), "", "")+
-    stat("إجمالي المستحق", money(d.due), "", "")+
-    stat("المدفوع", money(d.paid), "", "money")+
-    stat("المتبقي", money(d.rest), d.rest?"متأخر":"سديد", d.rest?"late":"")+
+    stat("الأبناء", ar(kids.length), "كود "+(f.code||"—"), "")+
+    stat("المستحق الأصلي", money(FS.gross), "", "")+
+    stat("الخصومات", money(FS.disc), FS.disc? "صافي "+money(FS.net) : "مفيش خصم", FS.disc?"warn":"")+
+    stat("المدفوع", money(FS.paid), "", "money")+
+    stat("المتبقي", money(FS.rest), FS.rest?"متأخر":"سديد", FS.rest?"late":"")+
   '</div>';
-  h += '<div class="card"><div class="hd"><h3>الأبناء</h3>'+
+
+  /* خصم الأسرة */
+  var live = famDiscs(fid).filter(discLive);
+  var past = famDiscs(fid).filter(function(dc){ return !discLive(dc); });
+  h += '<div class="card"><div class="hd"><h3>خصم الأسرة</h3>'+
+    (live.length? '<span class="tag ok">شغال</span>' : '<span class="tag">مفيش</span>')+'</div><div class="bd">';
+  if(!live.length){
+    h += '<div class="note" style="margin-bottom:10px">مفيش خصم للأسرة دلوقتي. تقدر تدّي خصم إخوة بـ٣ طرق: '+
+      'مبلغ ثابت لكل ابن · نسبة مئوية لكل ابن · أو مبلغ واحد للأسرة كلها يتوزّع عليهم.</div>'+
+      '<button class="btn block" data-act="famDisc" data-f="'+fid+'">٪ إضافة خصم للأسرة</button>';
+  }
+  live.forEach(function(dc){
+    h += '<div class="note ok" style="margin-bottom:10px"><b>'+esc(dc.reason||"خصم الأسرة")+'</b> — '+
+      esc(dc.type==="pct" ? ar(num(dc.value))+"٪ لكل ابن"
+        : (dc.type==="total" ? money(dc.value)+" للأسرة كلها في الشهر" : money(dc.value)+" لكل ابن في الشهر"))+
+      '<br>'+esc(discPeriodTxt(dc))+
+      (dc.type==="total" ? '<br>التوزيع: '+kids.map(function(s){
+          return esc(s.name)+' <b>'+money((dc.shares||{})[s.id])+'</b>'; }).join(" · ") : '')+
+      ((dc.incl||[]).length? '<br>مطبّق كمان على '+ar(dc.incl.length)+' مستحق مفتوح قديم باختيارك' : '')+'</div>';
+    if(dc.type==="total"){
+      var out = kids.filter(function(s){ return !isExempt(s) && (dc.shares||{})[s.id]===undefined; });
+      if(out.length) h += '<div class="note warn" style="margin-bottom:10px">'+
+        esc(out.map(function(s){ return s.name; }).join(" · "))+' اتضاف للأسرة بعد الخصم ومش داخل في التوزيع — '+
+        'دوس «تعديل الخصم» عشان تعيد التوزيع.</div>';
+    }
+    h += '<div class="row"><button class="btn ghost sm" data-act="famDisc" data-f="'+fid+'">تعديل الخصم</button>'+
+      '<button class="btn ghost sm" data-act="famDiscStop" data-i="'+dc.id+'" style="color:var(--bad)">إيقاف من النهاردة</button></div>';
+  });
+  if(past.length) h += '<div class="mut" style="font-size:12px;margin-top:10px">خصومات سابقة: '+
+    past.map(function(dc){ return esc(discValueTxt(dc))+' ('+esc(discPeriodTxt(dc))+')'; }).join(" · ")+'</div>';
+  h += '</div></div>';
+
+  /* كشف حساب الأسرة */
+  h += '<div class="card"><div class="hd"><h3>كشف حساب الأسرة</h3>'+
     '<span class="tag code">'+esc(f.code||"—")+'</span></div><div class="bd flush">';
   if(!kids.length) h += '<div class="empty"><b>مفيش أبناء مربوطين</b>'+
-    '<p>افتح صفحة الطالب واختار الأسرة دي.</p></div>';
-  kids.forEach(function(s){
-    var x = studentDue(s);
-    h += '<button class="item" data-act="openStu" data-s="'+s.id+'">'+
-      '<span class="av'+(x.rest?" b":"")+'">'+esc(initials(s.name))+'</span>'+
-      '<span class="tx"><b>'+esc(s.name)+'</b><small>'+
-        esc(studentGroups(s).map(function(g){ return g.name; }).join(" · ")||"مش في مجموعة")+'</small></span>'+
-      (x.rest? '<span class="tag bad">'+money(x.rest)+'</span>':'<span class="tag ok">سديد</span>')+
-      '<span class="chev">‹</span></button>';
-  });
+    '<p>افتح صفحة الطالب ← تعديل ← واختار الأسرة دي.</p></div>';
+  else{
+    h += '<div class="tw"><table id="famTable"><thead><tr><th>الابن</th><th>المستحق الأصلي</th><th>الخصم</th>'+
+      '<th>صافي المستحق</th><th>المدفوع</th><th>المتبقي</th><th>الحالة</th><th></th></tr></thead><tbody>';
+    FS.kids.forEach(function(k){
+      var s = k.s, F = k.F;
+      h += '<tr><td><button data-act="openStu" data-s="'+s.id+'" style="border:0;background:none;padding:0;'+
+          'font:inherit;color:var(--seal);font-weight:700;cursor:pointer;text-align:right">'+esc(s.name)+'</button>'+
+          '<br><span class="mut" style="font-size:11.5px">'+
+          esc(studentGroups(s).map(function(g){ return g.name; }).join(" · ")||"مش في مجموعة")+'</span></td>'+
+        (F.exempt ? '<td colspan="5" class="mut">★ معفي من الدفع</td><td>'+stTag("exempt")+'</td><td></td>'
+          : '<td>'+money(F.gross)+'</td><td>'+discCell(F.disc)+'</td><td>'+money(F.net)+'</td>'+
+            '<td style="color:var(--ok)">'+money(F.paid)+'</td>'+
+            '<td><b'+(F.rest?' style="color:var(--bad)"':'')+'>'+money(F.rest)+'</b></td>'+
+            '<td>'+stTag(F.st)+'</td>'+
+            '<td>'+(F.rest>0 ? '<button class="btn ok sm" data-act="payFull" data-s="'+s.id+
+              '" style="padding:5px 10px">سدّد</button>' : '')+'</td>')+
+        '</tr>';
+    });
+    h += '<tr style="background:var(--paper);font-weight:800"><td>إجمالي الأسرة</td>'+
+      '<td>'+money(FS.gross)+'</td><td>'+discCell(FS.disc)+'</td><td>'+money(FS.net)+'</td>'+
+      '<td style="color:var(--ok)">'+money(FS.paid)+'</td>'+
+      '<td'+(FS.rest?' style="color:var(--bad)"':'')+'>'+money(FS.rest)+'</td><td colspan="2"></td></tr>'+
+      '</tbody></table></div>';
+  }
   return h+'</div></div>';
 }
 
@@ -4844,17 +5395,39 @@ function viewArchive(){
 function viewMoney(){
   var late = lateStudents();
   var curM = new Date().getMonth()+1;
-  var totalDue = 0, totalPaid = 0;
-  activeStudents().forEach(function(s){ var d=studentDue(s); totalDue+=d.due; totalPaid+=d.paid; });
+  /* التقرير المالي — من نفس المستحقات والخصومات والدفعات */
+  var FG = finGroupTotals(), T = FG.total;
 
-  var h = pageHd("الفلوس", "المستحق والمحصّل والمتأخر",
+  var h = pageHd("الفلوس", "المستحق والخصومات والمحصّل والمتأخر",
+    '<button class="btn sm" data-act="openCollect">₤ تحصيل النهاردة</button>'+
     '<button class="btn ghost sm" data-act="print">⎙ طباعة</button>');
   h += '<div class="stats">'+
-    stat("محصّل الشهر", money(monthIncome(curM)), esc(MONTHS[curM-1]), "money")+
+    stat("محصّل الشهر", money(monthIncome(curM)), MONTHS[curM-1], "money")+
     stat("إجمالي التحصيل", money(totalIncome()), "من أول السنة", "money")+
-    stat("متأخرات", money(totalDue-totalPaid), ar(late.length)+" طالب", late.length?"late":"")+
-    stat("نسبة التحصيل", ar(totalDue? Math.round(totalPaid/totalDue*100):100)+"٪", "", "")+
+    stat("الخصومات", money(T.disc), T.disc? "من أصل "+money(T.gross) : "مفيش خصومات", T.disc?"warn":"")+
+    stat("متأخرات", money(T.rest), ar(late.length)+" طالب", late.length?"late":"")+
+    stat("نسبة التحصيل", ar(T.net? Math.round(T.paid/T.net*100):100)+"٪", "من صافي المستحق", "")+
   '</div>';
+
+  h += '<div class="card"><div class="hd"><h3>التقرير المالي بالمجموعات</h3>'+
+    '<span class="tag">لحد '+fmtD(today())+'</span></div><div class="bd flush"><div class="tw"><table id="finTable">'+
+    '<thead><tr><th>المجموعة</th><th>طلاب</th><th>المستحق الأصلي</th><th>الخصم</th>'+
+    '<th>صافي المستحق</th><th>المدفوع</th><th>المتبقي</th></tr></thead><tbody>';
+  if(!FG.rows.length) h += '<tr><td colspan="7"><div class="empty"><b>مفيش مجموعات</b></div></td></tr>';
+  FG.rows.forEach(function(o){
+    h += '<tr><td><button data-act="openGroup" data-g="'+o.g.id+'" style="border:0;background:none;padding:0;'+
+        'font:inherit;color:var(--seal);font-weight:700;cursor:pointer;text-align:right">'+esc(o.g.name)+'</button>'+
+        (o.free? '<br><span class="mut" style="font-size:11.5px">'+ar(o.free)+' معفي</span>' : '')+'</td>'+
+      '<td class="num">'+ar(o.n)+'</td><td>'+money(o.gross)+'</td><td>'+discCell(o.disc)+'</td>'+
+      '<td>'+money(o.net)+'</td><td><b style="color:var(--seal)">'+money(o.paid)+'</b></td>'+
+      '<td><b'+(o.rest?' style="color:var(--bad)"':'')+'>'+money(o.rest)+'</b>'+
+        (o.late? '<br><span class="mut" style="font-size:11.5px">'+ar(o.late)+' طالب</span>' : '')+'</td></tr>';
+  });
+  if(FG.rows.length) h += '<tr style="background:var(--paper);font-weight:800"><td>الإجمالي</td>'+
+    '<td class="num">'+ar(T.n)+'</td><td>'+money(T.gross)+'</td><td>'+discCell(T.disc)+'</td>'+
+    '<td>'+money(T.net)+'</td><td style="color:var(--seal)">'+money(T.paid)+'</td>'+
+    '<td'+(T.rest?' style="color:var(--bad)"':'')+'>'+money(T.rest)+'</td></tr>';
+  h += '</tbody></table></div></div></div>';
 
   /* تحصيل الشهور */
   h += '<div class="card"><div class="hd"><h3>التحصيل بالشهور</h3></div><div class="bd flush"><div class="tw"><table>'+
@@ -4899,22 +5472,23 @@ function viewReports(){
 
   /* أداء المجموعات */
   h += '<div class="card"><div class="hd"><h3>المجموعات</h3></div><div class="bd flush"><div class="tw"><table>'+
-    '<thead><tr><th>المجموعة</th><th>طلاب</th><th>الشهري</th><th>الدخل المتوقع</th>'+
-    '<th>المحصّل</th><th>الحضور</th></tr></thead><tbody>';
-  if(!DB.groups.length) h += '<tr><td colspan="6"><div class="empty"><b>مفيش مجموعات</b></div></td></tr>';
+    '<thead><tr><th>المجموعة</th><th>طلاب</th><th>السعر</th><th>صافي المستحق</th>'+
+    '<th>الخصومات</th><th>المحصّل</th><th>المتبقي</th><th>الحضور</th></tr></thead><tbody>';
+  if(!DB.groups.length) h += '<tr><td colspan="8"><div class="empty"><b>مفيش مجموعات</b></div></td></tr>';
+  /* نفس أرقام شاشة الفلوس — من المستحقات والخصومات والدفعات */
+  var FGr = {};
+  finGroupTotals().rows.forEach(function(o){ FGr[o.g.id] = o; });
   DB.groups.forEach(function(g){
     var st = groupStudents(g.id);
-    var exp = 0, got = 0, tot = 0, pres = 0;
+    var o = FGr[g.id] || { net:0, disc:0, paid:0, rest:0 };
+    var tot = 0, pres = 0;
     st.forEach(function(s){
-      dueMonths(s,g).forEach(function(mi){
-        exp += num(g.fee);
-        if(isPaid(s.id,g.id,mi)) got += num(g.fee);
-      });
       var a = attStats(s.id,g.id); tot += a.tot; pres += a.pres;
     });
     h += '<tr><td><b>'+esc(g.name)+'</b></td><td class="num">'+ar(st.length)+'</td>'+
-      '<td>'+money(g.fee)+'</td><td>'+money(exp)+'</td>'+
-      '<td><b style="color:var(--seal)">'+money(got)+'</b></td>'+
+      '<td>'+money(g.fee)+'</td><td>'+money(o.net)+'</td><td>'+discCell(o.disc)+'</td>'+
+      '<td><b style="color:var(--seal)">'+money(o.paid)+'</b></td>'+
+      '<td'+(o.rest?' style="color:var(--bad)"':'')+'>'+money(o.rest)+'</td>'+
       '<td class="num">'+(tot? ar(Math.round(pres/tot*100))+"٪" : "—")+'</td></tr>';
   });
   h += '</tbody></table></div></div></div>';
@@ -6071,7 +6645,18 @@ function saveStu(){
   s.groups = grps;
   s.joinDate = val("s_jd") || s.joinDate || today();
   s.joinMonth = num(String(s.joinDate).slice(5,7), schoolMonths()[0]);
-  var fv = val("s_fam"); if(fv) s.famId = fv; else delete s.famId;
+  /* ============================================================
+     تغيير الأسرة
+     · عضو جديد: خصم الأسرة بيمسكه من النهاردة — مش بأثر رجعي.
+     · خرج من الأسرة: الخصم اللي أخده بيتثبّت على مستحقاته
+       القديمة، فحسابه اللي فات مبيتغيّرش.
+     ============================================================ */
+  var fv = val("s_fam"), oldFam = s.famId || "";
+  if(document.getElementById("s_fam") && fv !== oldFam){
+    if(oldFam) famLeave(s, oldFam);
+    if(fv){ s.famId = fv; s.famSince = today(); }
+    else{ delete s.famId; delete s.famSince; }
+  }
   /* ============================================================
      تغيير الحالة المالية
      الإعفاء بيبدأ من تاريخ التغيير — مفيش إعفاء بأثر رجعي،
@@ -6256,7 +6841,10 @@ function sesModalHTML(gid, d){
                               : (r.old ? '' : 'سديد'))))+
               (r.old? (r.need||r.got? ' · ':'')+
                 '<b style="color:var(--bad)">متأخر '+money(r.old)+'</b>' : '')+
-              ((r.need&&r.old)? ' · الإجمالي '+money(r.need+r.old) : ''))+
+              ((r.need&&r.old)? ' · الإجمالي '+money(r.need+r.old) : '')+
+              /* الخصم والمدفوع الجزئي ظاهرين — عشان المتبقي يبقى مفهوم */
+              (r.P.disc>0 ? ' · خصم '+money(r.P.disc) : '')+
+              ((r.need+r.old)>0 && r.P.paid>0 ? ' · دفع '+money(r.P.paid)+' من '+money(r.P.net) : ''))+
         '</small></span>'+
         (r.ex ? '<span class="tag ok">معفي</span>'
               : (r.need||r.old
@@ -6284,13 +6872,7 @@ function sesModalHTML(gid, d){
             esc(S ? S.n : "واجب")+'</button>';
         })()+
         (r.ex ? ''
-          : ((r.need + r.old) > 0
-            ? '<button class="btn ok sm" data-act="payNow" data-g="'+gid+'" data-s="'+s.id+
-              '" data-d="'+d+'" style="padding:6px 10px">₤ دفع '+money(r.need+r.old)+'</button>'
-            : (r.got
-              ? '<button class="btn ghost sm" data-act="payNow" data-g="'+gid+'" data-s="'+s.id+
-                '" data-d="'+d+'" style="padding:6px 10px;color:var(--ok)">✓ مدفوع</button>'
-              : '')))+
+          : payBar(s, { gid:gid, d:d, rest:r.need+r.old, paidToday:r.got, mode:"mini", wa:true }))+
         '<button class="btn '+(note?"ok":"ghost")+' sm" data-act="sesNote" data-g="'+gid+
           '" data-d="'+d+'" data-s="'+s.id+'" style="padding:6px 10px" title="'+esc(note)+'">✎</button>'+
         (v==="A" && contactOf(s)
@@ -6956,19 +7538,14 @@ function stuReportData(sid, from, to){
   /* الفلوس */
   var pays = DB.pays.filter(function(p2){
     return p2.sid===sid && (!from || p2.date>=from) && (!to || p2.date<=to); });
-  var ses = sesDuesOf(sid).filter(function(x){
-    return (!from || x.date>=from) && (!to || x.date<=to); });
+  /* كل دفعة سجل واحد في DB.pays (شهري أو حصة) — مفيش عدّ مرتين */
+  var F2 = finSummary(sid);
   var money2 = {
-    paid: pays.reduce(function(a,x){ return a+num(x.amount); },0) +
-          ses.filter(function(x){ return x.paid; }).reduce(function(a,x){ return a+num(x.amount); },0),
-    rest: studentDue(s).rest,
+    paid: pays.reduce(function(a,x){ return a+num(x.amount); },0),
+    rest: F2.rest, disc: F2.disc, gross: F2.gross, net: F2.net,
     rows: pays.map(function(p2){
-      return { date:p2.date, what:(MONTHS[p2.mi-1]||"")+" — "+((groupById(p2.gid)||{}).name||""),
-               amount:num(p2.amount) };
-    }).concat(ses.filter(function(x){ return x.paid; }).map(function(x){
-      return { date:x.paidAt||x.date, what:"حصة "+fmtD(x.date)+" — "+((groupById(x.gid)||{}).name||""),
-               amount:num(x.amount) };
-    })).sort(function(a,b){ return String(b.date).localeCompare(String(a.date)); })
+      return { date:p2.date, what:payWhat(p2), amount:num(p2.amount) };
+    }).sort(function(a,b){ return String(b.date).localeCompare(String(a.date)); })
   };
   return { s:s, gs:gs, from:from, to:to, att:att, tk:tk, ex:ex, money:money2 };
 }
@@ -7332,23 +7909,6 @@ function printLateRep(gid){
 }
 
 /* ============================================================
-   تعديل الرسالة قبل الإرسال
-   بيستخدم نظام الرسائل الموجود (waMsg/waOpen) — مش نظام جديد.
-   ============================================================ */
-function modalMsgEdit(s, text, title){
-  openModal(mh(title||"رسالة")+'<div class="mb">'+
-    '<div class="note" style="margin-bottom:11px">لـ<b>'+esc(s.name)+'</b>'+
-      (s.guard? ' — ولي الأمر: '+esc(s.guard):'')+
-      '<br><span style="direction:ltr">'+esc(contactOf(s))+'</span></div>'+
-    '<label class="f"><span>نص الرسالة — تقدر تعدّله</span>'+
-      '<textarea id="me_t" style="min-height:130px">'+esc(text)+'</textarea></label>'+
-    '<div class="note">الرسالة هتتفتح في واتساب وانت اللي تضغط إرسال.</div>'+
-    '</div>'+
-    '<div class="mf"><button class="btn ghost" data-act="close">إلغاء</button>'+
-    '<button class="btn" data-act="meSend" data-s="'+s.id+'">✆ افتح واتساب</button></div>');
-}
-
-/* ============================================================
    تقرير المستحقات — النهاردة أو القديم
    كل مستحق في صف مستقل بتاريخه ونوعه وأيام تأخيره.
    ============================================================ */
@@ -7367,7 +7927,7 @@ function modalDues(which){
   var studs = Object.keys(by).map(function(k){ return by[k]; })
     .sort(function(a,b){ return b.sum-a.sum; });
   var t = today();
-  var h = '<div class="mb">';
+  var h = '<div class="mb" id="du_root" data-w="'+which+'">';
   if(!list.length){
     h += '<div class="note ok"><div style="font-size:32px;text-align:center">✓</div>'+
       '<b>مفيش '+(which==="old"?"متأخرات قديمة":"مستحقات النهاردة")+'</b></div>';
@@ -7390,12 +7950,13 @@ function modalDues(which){
             'border-top:1px solid var(--line2);font-size:12.5px;flex-wrap:wrap">'+
             '<span style="flex:1;min-width:120px"><b>'+esc(r.what)+'</b>'+
               '<br><span class="mut">'+fmtD(r.date)+' · '+esc(g2?g2.name:"")+
-              (r.kind==="ses"?" · حصة":" · شهري")+'</span></span>'+
+              (r.kind==="ses"?" · حصة":" · شهري")+
+              (r.disc? ' · الأصلي '+money(r.gross)+' − خصم '+money(r.disc) : '')+
+              (r.paidAmt? ' · اتدفع '+money(r.paidAmt) : '')+'</span></span>'+
             (days>0? '<span class="tag warn">متأخر '+ar(days)+' يوم</span>':'')+
             '<span class="tag bad">'+money(r.rest)+'</span>'+
-            '<button class="btn ok sm" data-act="payDue" data-k="'+r.kind+'" '+
-              'data-s="'+x.s.id+'" data-g="'+r.gid+'" data-i="'+esc(r.id)+'" '+
-              'data-mi="'+(r.mi||"")+'" data-a="'+r.amount+'" style="padding:5px 10px">سدّد</button>'+
+            '<button class="btn ok sm" data-act="payOne" '+
+              'data-s="'+x.s.id+'" data-i="'+esc(r.id)+'" style="padding:5px 10px">سدّد</button>'+
             '</div>';
         }).join("")+
         (contactOf(x.s)
@@ -7424,6 +7985,7 @@ function printDues(which){
     return '<tr><td>'+esc(r.s.name)+'</td><td>'+esc(g2?g2.name:"")+'</td>'+
       '<td>'+esc(payModeName(payModeOf(r.s)))+'</td>'+
       '<td>'+fmtD(r.date)+'</td><td>'+(r.kind==="ses"?"حصة":"شهري")+'</td>'+
+      '<td>'+Math.round(r.gross)+'</td><td>'+(r.disc? Math.round(r.disc) : "—")+'</td>'+
       '<td>'+Math.round(r.amount)+'</td><td>'+Math.round(r.amount-r.rest)+'</td>'+
       '<td><b>'+Math.round(r.rest)+'</b></td><td>'+(days||"—")+'</td></tr>';
   }).join("");
@@ -7441,59 +8003,12 @@ function printDues(which){
     '<div style="font-size:11.5px;color:#6A7F80">'+fmtD(t)+' · الإجمالي '+
       Math.round(which==="old"?D.oldSum:D.todaySum)+' ج</div></div>'+
     '<table><thead><tr><th>الطالب</th><th>المجموعة</th><th>النظام</th><th>تاريخ الاستحقاق</th>'+
-    '<th>النوع</th><th>المستحق</th><th>المدفوع</th><th>المتبقي</th><th>أيام التأخير</th></tr></thead>'+
+    '<th>النوع</th><th>الأصلي</th><th>الخصم</th><th>الصافي</th><th>المدفوع</th><th>المتبقي</th><th>أيام التأخير</th></tr></thead>'+
     '<tbody>'+rows+'</tbody></table>'+
     '<div class="ft"><span>التاريخ<b>'+fmtD(t)+'</b></span>'+
     '<span>توقيع المدرّس<b>................</b></span></div></body></html>');
   w.document.close();
   setTimeout(function(){ w.print(); }, 400);
-}
-
-/* ============================================================
-   نافذة الدفع — بتدعم الجزئي
-   بتوزّع المبلغ على المستحقات بالترتيب (الأقدم الأول)، فالمدرّس
-   يكتب اللي استلمه بس والنظام يوزّعه.
-   ============================================================ */
-function modalPay(s, g, dues, d, title){
-  var rest = dues.reduce(function(a,x){ return a+num(x.rest); }, 0);
-  var full = dues.reduce(function(a,x){ return a+num(x.amount); }, 0);
-  var paid = full - rest;
-  openModal(mh(title || ("دفع — "+s.name))+'<div class="mb">'+
-    '<div class="note" style="margin-bottom:11px"><b>'+esc(s.name)+'</b>'+
-      ' · '+esc(payModeName(payModeOf(s)))+
-      (g? '<br>'+esc(g.name):'')+'</div>'+
-    '<div class="stats" style="margin-bottom:11px">'+
-      stat("المستحق", money(full), ar(dues.length)+" بند","")+
-      (paid? stat("اتدفع", money(paid),"","money"):"")+
-      stat("المتبقي", money(rest),"", rest?"late":"money")+
-    '</div>'+
-    '<div style="border:1px solid var(--line);border-radius:11px;overflow:hidden;margin-bottom:11px">'+
-      dues.map(function(x){
-        var L = payLabel(x.amount, x.paidAmt||0);
-        return '<div style="display:flex;align-items:center;gap:8px;padding:9px 11px;'+
-          'border-bottom:1px solid var(--line2);font-size:13px">'+
-          '<span style="flex:1"><b>'+esc(x.what)+'</b><br>'+
-            '<span class="mut">'+fmtD(x.date)+' · '+(x.kind==="ses"?"حصة":"شهري")+'</span></span>'+
-          ((x.paidAmt||0)? '<span class="mut">اتدفع '+money(x.paidAmt)+'</span>':'')+
-          '<span class="tag '+L.c+'">'+money(x.rest)+'</span></div>';
-      }).join("")+'</div>'+
-    '<label class="f"><span>المبلغ المستلم</span>'+
-      '<input type="number" id="py_a" inputmode="decimal" value="'+esc(rest)+'" '+
-      'style="font-size:20px;text-align:center;font-weight:700"></label>'+
-    '<div class="row" style="margin-bottom:10px">'+
-      '<button class="btn ghost sm" data-act="pySet" data-v="'+rest+'">الكل ('+money(rest)+')</button>'+
-      '<button class="btn ghost sm" data-act="pySet" data-v="'+Math.round(rest/2)+'">نص ('+money(Math.round(rest/2))+')</button>'+
-    '</div>'+
-    '<div class="note">لو دفع أقل من المستحق، الباقي هيفضل عليه والحالة هتبقى '+
-      '<b>مدفوع جزئيًا</b>. والمبلغ بيتوزّع على البنود من الأقدم للأحدث.</div>'+
-    '</div>'+
-    '<div class="mf"><button class="btn ghost" data-act="payBack">رجوع</button>'+
-    '<button class="btn" data-act="savePay">✓ سجّل الدفع</button></div>');
-  $("#modal").dataset.sid = s.id;
-  $("#modal").dataset.dues = JSON.stringify(dues.map(function(x){
-    return { id:x.id, kind:x.kind, gid:x.gid, mi:x.mi||0,
-             amount:num(x.amount), rest:num(x.rest) };
-  }));
 }
 
 /* ============================================================
@@ -8136,17 +8651,14 @@ var ACTS = {
     var f=famById(el.dataset.f); if(!f) return;
     var k=famStudents(f.id).length;
     if(!confirm("حذف أسرة «"+f.name+"»؟"+(k? "\n"+k+" من الأبناء هيتفكّ ربطهم (مش هيتحذفوا).":""))) return;
-    DB.students.forEach(function(s){ if(s.famId===f.id) delete s.famId; });
+    DB.students.forEach(function(s){
+      if(s.famId!==f.id) return;
+      famLeave(s, f.id);                 /* خصمهم القديم بيتثبّت على مستحقاتهم */
+      delete s.famId; delete s.famSince;
+    });
+    DB.discounts = (DB.discounts||[]).filter(function(dc){ return !(dc.scope==="fam" && dc.famId===f.id); });
     DB.families=DB.families.filter(function(x){ return x!==f; });
     saveSync(); closeModal(); UI.sub=null; render(); toast("اتحذفت");
-  },
-  waFam: function(el){
-    var f=famById(el.dataset.f); if(!f||!f.phone){ toast("مفيش رقم"); return; }
-    var d=famDue(f), kids=famStudents(f.id);
-    var txt="السلام عليكم\n"+(f.guard? f.guard+"\n":"")+
-      "بخصوص "+(kids.length>1? "الأبناء":"الابن")+": "+kids.map(function(s){ return s.name; }).join(" · ")+
-      (d.rest? "\nالمستحق: "+money(d.rest) : "")+"\n"+(DB.meta.name||"");
-    waOpen(f.phone, txt);
   },
   /* ---------- المذكرات ---------- */
   newBook:  function(){ modalBook(""); },
@@ -8209,12 +8721,6 @@ var ACTS = {
     closeModal(); makeCert(el.dataset.s, k);
   },
   /* ---------- واتساب عام ---------- */
-  meSend: function(el){
-    var s = studentById(el.dataset.s);
-    var t = val("me_t");
-    closeModal();
-    if(s) waOpen(contactOf(s), t);
-  },
   waStu: function(el){
     var s=studentById(el.dataset.s); if(!s) return;
     waOpen(contactOf(s), waMsg(el.dataset.k||"plain", s, {}));
@@ -8233,16 +8739,6 @@ var ACTS = {
         waOpen(contactOf(s), waMsg("absent", s, { date:d, group:g?g.name:"" }));
       }, i*900);
     });
-  },
-  waDue: function(el){
-    var s=studentById(el.dataset.s); if(!s) return;
-    /* الحارس الوحيد لكل التذكيرات المالية */
-    if(isExempt(s)){ toast("الطالب معفي من الدفع — مفيش تذكير مالي"); return; }
-    var d=studentDue(s);
-    if(!d.rest){ toast("الطالب سديد"); return; }
-    if(!contactOf(s)){ toast("مفيش رقم مسجّل"); return; }
-    modalMsgEdit(s, waMsg("due", s, { amount:d.rest, month:MONTHS[new Date().getMonth()] }),
-      "تذكير بالمستحق");
   },
   /* ---------- سجل الحصص ---------- */
   shG: function(el){ UI.shG = el.dataset.g||""; render(); },
@@ -8666,28 +9162,6 @@ var ACTS = {
   duesToday:  function(){ modalDues("today"); },
   duesOld:    function(){ modalDues("old"); },
   duesPrint:  function(el){ closeModal(); printDues(el.dataset.w); },
-  /* تسديد مستحق من التقرير */
-  payDue: function(el){
-    var s = studentById(el.dataset.s), g = groupById(el.dataset.g);
-    if(!s || !g) return;
-    var amt = num(el.dataset.a);
-    if(!confirm("تسجيل دفعة "+money(amt)+" للطالب "+s.name+"؟")) return;
-    if(el.dataset.k==="ses"){
-      var due = (DB.sesDue||[]).filter(function(x){ return x.id===el.dataset.i; })[0];
-      if(!due) return;
-      payAdd({ sid:s.id, gid:g.id, amount:due.amount, date:today(),
-               kind:"ses", dueId:due.id, dueDate:due.date });
-      due.paid = true; due.paidAt = today();
-    }else{
-      var mi = num(el.dataset.mi);
-      if(payOfMonth(s.id, g.id, mi)){ toast("مدفوع خلاص"); return; }
-      payAdd({ sid:s.id, gid:g.id, amount:amt, mi:mi, kind:"month", date:today() });
-    }
-    saveSync();
-    var w2 = UI._duesW || "today";
-    closeModal(); render();
-    toast("اتسجّل "+money(amt));
-  },
   /* ============================================================
      إدارة الطالب من شاشة المجموعة
      ============================================================ */
@@ -8747,42 +9221,6 @@ var ACTS = {
     render();
     toast(el.dataset.v? "اتسجّل الواجب" : "اتمسح");
   },
-  gPay: function(el){
-    var s = studentById(el.dataset.s), g = groupById(el.dataset.g);
-    if(!s || !g) return;
-    var mk2 = el.dataset.m, P = payStateOf(s, g, mk2);
-    if(P.mode==="free"){ toast("الطالب معفي"); return; }
-    if(P.mode==="ses"){
-      var rest = (P.rows||[]).filter(function(x){ return !duePaid(x); });
-      if(!rest.length){
-        var pd = (P.rows||[]).filter(function(x){ return duePaid(x); });
-        if(!pd.length) return;
-        if(!confirm("إلغاء دفع حصة "+fmtD(pd[0].date)+"؟")) return;
-        payDel(payOfDue(pd[0].id));
-        saveSync(); render(); toast("اتلغت"); return;
-      }
-      if(!confirm("تسديد "+rest.length+" حصة بإجمالي "+money(P.rest)+"؟")) return;
-      rest.forEach(function(x){
-        payAdd({ sid:s.id, gid:g.id, amount:x.amount, date:today(),
-                 kind:"ses", dueId:x.id, dueDate:x.date });
-        x.paid = true; x.paidAt = today();      /* للتوافق مع النسخ القديمة */
-      });
-      saveSync(); render(); toast("اتسدّد "+money(P.rest));
-      return;
-    }
-    /* شهري */
-    var mi = P.mi;
-    if(!mi){ toast("لسه ما اشتركش في الشهر ده"); return; }
-    var ex = payOfMonth(s.id, g.id, mi);
-    if(ex){
-      if(!confirm("إلغاء دفعة "+MONTHS[mi-1]+" ("+money(ex.amount)+")؟")) return;
-      payDel(ex);
-      saveSync(); render(); toast("اتلغت"); return;
-    }
-    payAdd({ sid:s.id, gid:g.id, amount:g.fee, mi:mi, kind:"month", date:today() });
-    saveSync(); render();
-    toast("اتسجّل "+money(g.fee)+" — "+MONTHS[mi-1]);
-  },
   /* رسالة غياب — منفصلة تمامًا عن تذكير المستحق */
   waAbsent: function(el){
     var s = studentById(el.dataset.s);
@@ -8816,6 +9254,8 @@ var ACTS = {
       s.groups = (s.groups||[]).filter(function(x){ return x!==g.id; }); });
     DB.pays   = DB.pays.filter(function(p){ return p.gid!==g.id; });
     DB.sesDue = (DB.sesDue||[]).filter(function(x){ return x.gid!==g.id; });
+    DB.discounts = (DB.discounts||[]).filter(function(x){ return x.gid!==g.id; });
+    DB.voids     = (DB.voids||[]).filter(function(x){ return x.gid!==g.id; });
     Object.keys(DB.sessions).forEach(function(k){ if(k.split("|")[0]===g.id) delete DB.sessions[k]; });
     /* الامتحانات ومحاولاتها */
     var exIds = DB.exams.filter(function(e){ return e.gid===g.id; }).map(function(e){ return e.id; });
@@ -8851,6 +9291,9 @@ var ACTS = {
        وتلخبط المتوسطات وعدد الناجحين. */
     DB.pays   = DB.pays.filter(function(p){ return p.sid!==s.id; });
     DB.sesDue = (DB.sesDue||[]).filter(function(x){ return x.sid!==s.id; });
+    DB.discounts = (DB.discounts||[]).filter(function(x){ return x.sid!==s.id; });
+    DB.voids     = (DB.voids||[]).filter(function(x){ return x.sid!==s.id; });
+    DB.payNotes  = (DB.payNotes||[]).filter(function(x){ return x.sid!==s.id; });
     Object.keys(DB.sessions).forEach(function(k){
       if(DB.sessions[k].att)   delete DB.sessions[k].att[s.id];
       if(DB.sessions[k].hw)    delete DB.sessions[k].hw[s.id];      /* واجب الحصة */
@@ -8918,82 +9361,6 @@ var ACTS = {
   sesQ: function(){},
   openStuFromSes: function(el){
     closeModal(); UI.sub={s:el.dataset.s}; UI.tab="studs"; render();
-  },
-  /* ============================================================
-     تسجيل الدفع — بيستخدم نفس عملية الدفع المركزية
-     وبيدعم الدفع الجزئي
-     ============================================================ */
-  payNow: function(el){
-    var box2 = document.querySelector("#modal .mb");
-    UI.sesY = box2 ? box2.scrollTop : 0;
-    var s = studentById(el.dataset.s), g = groupById(el.dataset.g);
-    if(!s || !g) return;
-    if(isExempt(s)){ toast("الطالب معفي من الدفع"); return; }
-    var d = el.dataset.d || today();
-    /* المستحق النهاردة + المتأخرات — كلهم في نافذة واحدة */
-    var dues = duesOf(s.id, d).filter(function(x){ return x.date<=d && x.rest>0; });
-    if(!dues.length){
-      /* كله مدفوع — نعرض إلغاء آخر دفعة */
-      var paid = duesOf(s.id, d).filter(function(x){ return x.date<=d && (x.paidAmt||0)>0; });
-      if(!paid.length){ toast("مفيش مستحقات"); return; }
-      modalPay(s, g, paid, d, "دفعات "+s.name);
-      return;
-    }
-    modalPay(s, g, dues, d);
-  },
-  payOld: function(el){
-    var s = studentById(el.dataset.s);
-    if(!s) return;
-    if(isExempt(s)){ toast("الطالب معفي"); return; }
-    var d = today();
-    var old = duesOf(s.id, d).filter(function(x){ return x.date < d && x.rest>0; });
-    if(!old.length){ toast("مفيش متأخرات"); return; }
-    modalPay(s, groupById(old[0].gid), old, d, "متأخرات سابقة");
-  },
-  pySet: function(el){
-    var i = document.getElementById("py_a");
-    if(i) i.value = el.dataset.v;
-  },
-  payBack: function(){
-    closeModal();
-    if(UI.sesG) modalSession(UI.sesG, UI.sesD);
-  },
-  savePay: function(){
-    var sid = $("#modal").dataset.sid;
-    var s = studentById(sid);
-    if(!s) return;
-    var amt = num(val("py_a"), 0);
-    if(amt <= 0){ toast("اكتب المبلغ"); return; }
-    var list = JSON.parse($("#modal").dataset.dues || "[]");
-    /* بنوزّع المبلغ على المستحقات بالترتيب — الأقدم الأول */
-    var left = amt, done = 0;
-    list.forEach(function(x){
-      if(left <= 0) return;
-      var rest = num(x.rest);
-      if(rest <= 0) return;
-      var take = Math.min(left, rest);
-      if(x.kind === "ses"){
-        var due = (DB.sesDue||[]).filter(function(y){ return y.id===x.id; })[0];
-        if(!due) return;
-        payAdd({ sid:s.id, gid:x.gid, amount:take, date:today(),
-                 kind:"ses", dueId:due.id, dueDate:due.date });
-        if(paidForDue(due.id) >= num(due.amount)-0.001){ due.paid=true; due.paidAt=today(); }
-      }else{
-        payAdd({ sid:s.id, gid:x.gid, amount:take, mi:num(x.mi),
-                 kind:"month", date:today() });
-      }
-      left -= take; done += take;
-    });
-    saveSync({ type:"pay", data:{ sid:s.id, date:today() } });
-    if(UI.sesG){
-      $("#modal").innerHTML = sesModalHTML(UI.sesG, UI.sesD);
-      requestAnimationFrame(function(){
-        var b2 = document.querySelector("#modal .mb");
-        if(b2) b2.scrollTop = UI.sesY || 0;
-      });
-    }else closeModal();
-    render();
-    toast("اتسجّل "+money(done)+(left>0? " · فاضل "+money(left)+" زيادة":""));
   },
   /* ملاحظة على الطالب في الحصة */
   sesNote: function(el){
@@ -9154,50 +9521,6 @@ var ACTS = {
   allAbs:  function(el){ 
     if(!confirm("تسجيل كل الطلاب غايبين في الحصة دي؟")) return;
     bulkAtt(el.dataset.g, el.dataset.d, "A"); },
-  /* فلوس */
-  /* تسديد حصة واحدة */
-  paySes: function(el){
-    var x = (DB.sesDue||[]).filter(function(y){ return y.id===el.dataset.i; })[0];
-    if(!x) return;
-    var p = payOfDue(x.id);
-    if(p){ payDel(p); x.paid=false; x.paidAt=""; saveSync(); render(); toast("اتلغت الدفعة"); }
-    else{
-      payAdd({ sid:x.sid, gid:x.gid, amount:x.amount, date:today(),
-               kind:"ses", dueId:x.id, dueDate:x.date });
-      x.paid=true; x.paidAt=today();
-      saveSync(); render(); toast("اتسجّل "+money(x.amount));
-    }
-  },
-  /* تسديد كل الحصص المتأخرة */
-  paySesAll: function(el){
-    var dues = sesDuesOf(el.dataset.s, el.dataset.g).filter(function(x){ return !duePaid(x); });
-    if(!dues.length) return;
-    var t = dues.reduce(function(a,x){ return a+num(x.amount); }, 0);
-    if(!confirm("تسديد "+dues.length+" حصة بإجمالي "+money(t)+"؟")) return;
-    dues.forEach(function(x){
-      payAdd({ sid:x.sid, gid:x.gid, amount:x.amount, date:today(),
-               kind:"ses", dueId:x.id, dueDate:x.date });
-      x.paid = true; x.paidAt = today();
-    });
-    saveSync(); render();
-    toast("اتسدّد "+money(t));
-  },
-  togglePay: function(el){
-    var sid = el.dataset.s, gid = el.dataset.g, mi = num(el.dataset.m);
-    var g = groupById(gid), s = studentById(sid);
-    if(!g || !s) return;
-    var p = payOf(sid, gid, mi);
-    if(p){
-      if(!confirm("إلغاء دفعة "+MONTHS[mi-1]+" لـ"+s.name+" ("+money(p.amount)+")؟")) return;
-      DB.pays = DB.pays.filter(function(x){ return x!==p; });
-      toast("اتلغت الدفعة");
-    }else{
-      DB.pays.push({ id:uid("p"), sid:sid, gid:gid, mi:mi,
-                     amount:num(g.fee), date:today(), at:Date.now() });
-      toast("اتسجّلت "+money(g.fee)+" — "+MONTHS[mi-1]);
-    }
-    saveSync(); render();
-  },
   printStu: function(el){ printReceipt(el.dataset.s); },
   stuReport: function(el){ modalStuReport(el.dataset.s); },
   srRange: function(el){
@@ -9558,13 +9881,16 @@ function printReceipt(sid){
     '<p><b>الطالب:</b> '+esc(s.name)+(s.grade? ' — '+esc(s.grade):'')+'<br>'+
     (s.guard? '<b>ولي الأمر:</b> '+esc(s.guard)+'<br>':'')+
     '<b>التاريخ:</b> '+fmtD(today())+'</p>'+
-    '<table><thead><tr><th>الشهر</th><th>المجموعة</th><th>المبلغ</th><th>تاريخ الدفع</th></tr></thead><tbody>'+
+    '<table><thead><tr><th>عن</th><th>المجموعة</th><th>المبلغ</th><th>تاريخ الدفع</th></tr></thead><tbody>'+
     (mine.length? mine.map(function(p){
       var g = groupById(p.gid);
-      return '<tr><td>'+esc(MONTHS[p.mi-1])+'</td><td>'+esc(g?g.name:"—")+'</td>'+
+      return '<tr><td>'+esc(p.dueId ? "حصة "+fmtD(p.dueDate||p.date) : (MONTHS[p.mi-1]||""))+'</td>'+
+        '<td>'+esc(g?g.name:"—")+'</td>'+
         '<td>'+money(p.amount)+'</td><td>'+fmtD(p.date)+'</td></tr>';
     }).join("") : '<tr><td colspan="4">مفيش دفعات</td></tr>')+
     '</tbody><tfoot><tr><th colspan="2">الإجمالي المدفوع</th><th colspan="2">'+money(tot)+'</th></tr>'+
+    (d.disc? '<tr><th colspan="2">المستحق الأصلي</th><th colspan="2">'+money(d.gross)+'</th></tr>'+
+             '<tr><th colspan="2">الخصم</th><th colspan="2">'+money(d.disc)+'</th></tr>':'')+
     (d.rest? '<tr><th colspan="2">المتبقي</th><th colspan="2">'+money(d.rest)+'</th></tr>':'')+
     '</tfoot></table>'+
     '<div class="ft"><span>توقيع المدرّس: ................</span>'+
@@ -9582,12 +9908,12 @@ function dl(name, text, type){
 }
 function exportCsv(){
   var rows = [["الطالب","الصف","الهاتف","ولي الأمر","هاتف ولي الأمر","المجموعات",
-               "المستحق","المدفوع","المتبقي","نسبة الحضور"]];
+               "المستحق الأصلي","الخصم","صافي المستحق","المدفوع","المتبقي","نسبة الحضور"]];
   activeStudents().forEach(function(s){
-    var d = studentDue(s), a = attStats(s.id, null);
+    var d = finSummary(s.id), a = attStats(s.id, null);
     rows.push([s.name, s.grade||"", s.phone||"", s.guard||"", s.guardPhone||"",
       studentGroups(s).map(function(g){ return g.name; }).join(" | "),
-      d.due, d.paid, d.rest, a.tot? a.rate+"%" : ""]);
+      d.gross, d.disc, d.net, d.paid, d.rest, a.tot? a.rate+"%" : ""]);
   });
   dl("دروسي-الطلاب.csv", rows.map(function(r){
     return r.map(function(c){ return '"'+String(c==null?"":c).replace(/"/g,'""')+'"'; }).join(",");
@@ -10281,6 +10607,1303 @@ function restoreSession(){
   });
   render();
 }
+
+/* ============================================================
+   ============================================================
+   التحصيل والخصومات وكشوف الحساب  (v7.6)
+
+   كل اللي تحت ده واجهات بس — الأرقام كلها جاية من نفس الدوال
+   المركزية: finRows · finSummary · payStatus · collectRows.
+   مفيش شاشة بتحسب لنفسها.
+   ============================================================
+   ============================================================ */
+
+/* شبكة الكشف: الأصلي · الخصم · الصافي · المدفوع · المتبقي */
+function finGrid(cells){
+  return '<div class="fin">'+cells.filter(Boolean).map(function(c){
+    return '<div><div class="k">'+esc(c[0])+'</div><div class="v '+(c[2]||"")+'">'+c[1]+'</div></div>';
+  }).join("")+'</div>';
+}
+function stTag(st, big){
+  var x = PAY_ST[st] || PAY_ST.none;
+  return '<span class="tag '+x.c+'"'+(big?' style="font-size:12px;padding:5px 11px"':'')+'>'+esc(x.t)+'</span>';
+}
+function discCell(v){ return v>0 ? "− "+money(v) : "—"; }
+
+/* أرقام الواتساب: ولي الأمر الأول، وبعده الطالب، وبعده رقم الأسرة */
+function stuPhones(s){
+  var out = [], seen = {};
+  function add(l, n){
+    var w = waNum(n);
+    if(!w || seen[w]) return;
+    seen[w] = 1; out.push({ l:l, n:n, w:w });
+  }
+  if(!s) return out;
+  add("ولي الأمر"+(s.guard? " ("+s.guard+")" : ""), s.guardPhone);
+  var f = s.famId ? famById(s.famId) : null;
+  if(f) add("رقم الأسرة"+(f.guard? " ("+f.guard+")" : ""), f.phone);
+  add("الطالب", s.phone);
+  return out;
+}
+
+/* ============================================================
+   أزرار السداد — نفس الأزرار في كل مكان
+   mode "full": ملف الطالب وشاشة التحصيل
+   mode "mini": صف المجموعة ونافذة الحصة (الباقي جوه نافذة الدفع)
+   ============================================================ */
+function payBar(s, o){
+  o = o || {};
+  var a = ' data-s="'+s.id+'"'+(o.gid? ' data-g="'+o.gid+'"':'')+(o.d? ' data-d="'+o.d+'"':'')+
+          (o.only? ' data-o="1"':'');
+  var h = '<div class="paybar">';
+  if(o.rest > 0){
+    h += '<button class="btn ok" data-act="payFull"'+a+'>✓ سداد المتبقي ('+money(o.rest)+')</button>'+
+         '<button class="btn ghost" data-act="payPart"'+a+'>◔ سداد جزء</button>';
+    if(o.mode!=="mini")
+      h += '<button class="btn ghost" data-act="noPay"'+a+' style="color:var(--bad)">✕ لم يسدد</button>';
+  }else if(o.paidToday > 0 && o.mode==="mini"){
+    h += '<button class="btn ghost" data-act="ledger"'+a+' style="color:var(--ok)">✓ مدفوع</button>';
+  }
+  h += '<button class="btn ghost" data-act="ledger"'+a+'>☰ '+(o.mode==="mini"?"السجل":"سجل المدفوعات")+'</button>';
+  if(o.disc) h += '<button class="btn ghost" data-act="discNew"'+a+'>٪ إضافة خصم</button>';
+  if(o.wa && stuPhones(s).length && o.rest > 0)
+    h += '<button class="btn wa" data-act="waDue"'+a+' title="رسالة المتبقي لولي الأمر">✆'+
+         (o.mode==="mini" ? '' : ' واتساب')+'</button>';
+  return h+'</div>';
+}
+
+/* ============================================================
+   شاشة «تحصيل النهاردة» — مركز العمل المالي
+   ============================================================ */
+function collectRowHTML(r, d){
+  var s = r.s;
+  var whats = r.rows.map(function(R){ return R.what; });
+  var reasons = [];
+  r.rows.forEach(function(R){ (R.parts||[]).forEach(function(p){
+    if(p.a>0 && reasons.indexOf(p.name)<0) reasons.push(p.name); }); });
+  var h = '<div class="crow" data-sid="'+s.id+'" style="padding:12px 14px;border-bottom:1px solid var(--line2)">'+
+    '<div style="display:flex;gap:9px;align-items:center;margin-bottom:8px">'+
+      '<button class="av'+(r.st==="paid"?" g":(r.st==="partial"?" w":" b"))+'" data-act="openStu" data-s="'+s.id+
+        '" style="border:0;cursor:pointer">'+esc(initials(s.name))+'</button>'+
+      '<span class="tx" data-act="openStu" data-s="'+s.id+'" style="cursor:pointer"><b>'+esc(s.name)+'</b><small>'+
+        esc(payModeName(r.mode))+(whats.length? ' · '+esc(whats.slice(0,3).join("، "))+
+        (whats.length>3? " +"+ar(whats.length-3) : "") : '')+'</small></span>'+
+      stTag(r.st)+
+    '</div>'+
+    finGrid([
+      ["المستحق الأصلي", money(r.gross)],
+      ["الخصم", discCell(r.disc), r.disc? "warn":""],
+      ["صافي المستحق", money(r.net)],
+      ["المدفوع سابقًا", money(r.paidBefore), r.paidBefore? "ok":""],
+      ["دفعات اليوم", money(r.paidToday), r.paidToday? "ok":""],
+      ["المتبقي", money(r.rest), r.rest? "bad":"ok"]
+    ]);
+  var lines = [];
+  if(r.arrearsBefore > 0 && r.dueTodayNet > 0)
+    lines.push('متأخرات سابقة <b>'+money(r.arrearsBefore)+'</b> · مستحق اليوم <b>'+money(r.dueTodayNet)+
+      '</b> · المطلوب قبل الدفع <b>'+money(r.needBefore)+'</b>');
+  if(reasons.length) lines.push(esc(reasons.join(" · ")));
+  if(r.asked) lines.push('<span style="color:var(--bad)">✕ اتسجّل «لم يسدد»'+
+    (r.asked.reason? ' — '+esc(r.asked.reason) : '')+
+    (r.asked.promise? ' · وعد بالسداد '+fmtD(r.asked.promise) : '')+'</span>');
+  if(lines.length) h += '<div class="mut" style="font-size:12px;margin-top:6px;line-height:1.7">'+
+    lines.join("<br>")+'</div>';
+  h += '<div style="margin-top:8px">'+payBar(s, { gid:r.g.id, d:d, rest:r.rest, only:true,
+         paidToday:r.paidToday, wa:true })+'</div></div>';
+  return h;
+}
+function viewCollect(){
+  var d = UI.cDate || today();
+  var S = collectSummary(d);
+  var F = UI.cF || "";
+  var isT = d===today();
+  var h = pageHd(isT ? "تحصيل النهاردة" : "تحصيل "+fmtD(d), esc(DAYS[dowOf(d)])+" · "+fmtD(d),
+    '<input type="date" value="'+d+'" data-act="cDate" style="width:auto;padding:7px 9px;font-size:13px">'+
+    '<button class="btn ghost sm" data-act="printCollect" data-d="'+d+'">⎙ تقرير اليوم</button>');
+
+  h += '<div class="stats">'+
+    stat("مستحق اليوم", money(S.dueToday),
+         S.dueToday ? "متبقي منه "+money(S.restToday) : "مفيش مستحق جديد", "acc")+
+    stat("متأخرات سابقة", money(S.arrearsBefore),
+         S.arrearsBefore ? "المطلوب كله "+money(S.needBefore) : "مفيش", S.arrearsBefore?"late":"")+
+    stat("اتحصّل اليوم", money(S.gotAll), "من "+money(S.needBefore)+" مطلوب", "money")+
+    stat("المتبقي للتحصيل", money(S.rest),
+         S.rest ? (S.restToday? "منه "+money(S.restToday)+" من مستحق اليوم" : "كله متأخرات") : "اتحصّل كله",
+         S.rest?"late":"money")+
+    stat("دفعوا بالكامل", ar(S.nPaid), "من "+ar(S.nStu)+" طالب", "money")+
+    stat("دفعوا جزء", ar(S.nPartial), "", S.nPartial?"warn":"")+
+    stat("لم يدفعوا", ar(S.nUnpaid), "", S.nUnpaid?"late":"")+
+    stat("الخصومات", money(S.disc), S.disc? "منها "+money(S.discToday)+" على مستحق اليوم" : "مفيش خصومات", "")+
+  '</div>';
+
+  if(!isT) h += '<div class="note" style="margin-bottom:11px">ده يوم فات — المتبقي محسوب بالوضع الحالي.</div>';
+
+  var cnt = { "":S.rows.length, unpaid:0, partial:0, paid:0, today:0, old:0 };
+  S.rows.forEach(function(r){
+    if(cnt[r.st]!==undefined) cnt[r.st]++;
+    if(r.dueTodayNet>0) cnt.today++;
+    if(r.arrearsBefore>0) cnt.old++;
+  });
+  h += '<input type="search" data-act="setQ" value="'+esc(UI.q||"")+'" placeholder="ابحث عن طالب…" '+
+       'style="margin-bottom:8px">';
+  h += '<div class="chips">'+[["","الكل"],["unpaid","لم يدفع"],["partial","دفع جزء"],["paid","دفع بالكامل"],
+        ["today","مستحق اليوم"],["old","متأخرات"]].map(function(x){
+    return '<button class="'+(F===x[0]?"on":"")+'" data-act="cF" data-f="'+x[0]+'">'+esc(x[1])+
+      ' <small>'+ar(cnt[x[0]])+'</small></button>';
+  }).join("")+'</div>';
+
+  if(!S.rows.length){
+    return h+'<div class="card"><div class="bd"><div class="empty"><div class="big">✓</div>'+
+      '<b>مفيش تحصيل مطلوب '+(isT?"النهاردة":"في اليوم ده")+'</b>'+
+      '<p>مفيش مستحقات مفتوحة ولا دفعات متسجّلة.</p></div></div></div>';
+  }
+  var Q = normAr(UI.q||"");
+  var shown = S.rows.filter(function(r){
+    if(Q && normAr(r.s.name).indexOf(Q)<0) return false;
+    if(F==="today") return r.dueTodayNet>0;
+    if(F==="old")   return r.arrearsBefore>0;
+    if(F) return r.st===F;
+    return true;
+  });
+  if(!shown.length) h += '<div class="card"><div class="bd"><div class="empty"><b>مفيش طلاب في الفلتر ده</b></div></div></div>';
+  var byG = {}, order = [];
+  shown.forEach(function(r){
+    if(!byG[r.g.id]){ byG[r.g.id] = []; order.push(r.g); }
+    byG[r.g.id].push(r);
+  });
+  order.forEach(function(g){
+    var L = byG[g.id];
+    var need = 0, got = 0, rest = 0;
+    L.forEach(function(r){ need += r.needBefore; got += r.paidToday; rest += r.rest; });
+    h += '<div class="card"><div class="hd"><h3>'+esc(g.name)+'</h3>'+
+      '<span class="tag '+(rest?"bad":"ok")+'">'+(rest? "متبقي "+money(rest) : "اتحصّل كله")+'</span></div>'+
+      '<div class="bd flush">'+
+      '<div class="mut" style="font-size:12px;padding:8px 14px;border-bottom:1px solid var(--line2);background:var(--paper)">'+
+        ar(L.length)+' طالب · المطلوب <b>'+money(need)+'</b> · اتحصّل اليوم <b>'+money(got)+
+        '</b> · المتبقي <b>'+money(rest)+'</b></div>'+
+      L.map(function(r){ return collectRowHTML(r, d); }).join("")+
+      '</div></div>';
+  });
+  return h;
+}
+
+/* ============================================================
+   تقرير تحصيل اليوم — للطباعة
+   ============================================================ */
+function collectReportHTML(d){
+  var S = collectSummary(d);
+  var byG = {}, order = [];
+  S.rows.forEach(function(r){
+    if(!byG[r.g.id]){ byG[r.g.id] = []; order.push(r.g); }
+    byG[r.g.id].push(r);
+  });
+  function n(v){ return Math.round(num(v)); }
+  var body = "";
+  order.forEach(function(g){
+    var L = byG[g.id], t = { gross:0, disc:0, net:0, pb:0, pt:0, rest:0 };
+    body += '<tr class="g"><td colspan="10">'+esc(g.name)+' — '+L.length+' طالب</td></tr>';
+    L.forEach(function(r){
+      t.gross+=r.gross; t.disc+=r.disc; t.net+=r.net; t.pb+=r.paidBefore; t.pt+=r.paidToday; t.rest+=r.rest;
+      var ph = stuPhones(r.s)[0];
+      body += '<tr><td>'+esc(r.s.name)+'</td>'+
+        '<td class="ph">'+(ph? '<a href="'+esc(waLink(ph.n, waDueText(r.s, r.g.id)))+'" target="_blank">'+
+            esc(ph.n)+'</a>' : '—')+'</td>'+
+        '<td>'+esc(payModeName(r.mode))+'</td>'+
+        '<td>'+n(r.gross)+'</td><td>'+(r.disc? n(r.disc) : "—")+'</td><td>'+n(r.net)+'</td>'+
+        '<td>'+n(r.paidBefore)+'</td><td><b>'+n(r.paidToday)+'</b></td>'+
+        '<td><b>'+n(r.rest)+'</b></td><td>'+esc((PAY_ST[r.st]||PAY_ST.none).t)+'</td></tr>';
+    });
+    body += '<tr class="t"><td colspan="3">إجمالي '+esc(g.name)+'</td>'+
+      '<td>'+n(t.gross)+'</td><td>'+n(t.disc)+'</td><td>'+n(t.net)+'</td><td>'+n(t.pb)+'</td>'+
+      '<td>'+n(t.pt)+'</td><td>'+n(t.rest)+'</td><td></td></tr>';
+  });
+  if(!order.length) body = '<tr><td colspan="10" style="text-align:center;padding:18px">مفيش تحصيل في اليوم ده</td></tr>';
+  var pb = S.rows.reduce(function(a,r){ return a+r.paidBefore; }, 0);
+  return '<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8">'+
+    '<title>تقرير تحصيل '+esc(d)+'</title><style>'+
+    'body{font-family:system-ui,sans-serif;padding:16px;color:#0E1A2B;max-width:1000px;margin:0 auto}'+
+    '.hd{text-align:center;border-bottom:3px solid #014A59;padding-bottom:9px;margin-bottom:12px}'+
+    '.hd h1{font-size:18px;margin:0 0 3px;color:#014A59}'+
+    '.sum{display:flex;gap:8px;margin:12px 0;flex-wrap:wrap}'+
+    '.sum div{border:1px solid #DCE6E4;border-radius:9px;padding:7px 12px;font-size:11px;flex:1;min-width:110px}'+
+    '.sum b{display:block;font-size:16px}'+
+    'table{width:100%;border-collapse:collapse;font-size:11.5px;margin-top:10px}'+
+    'th,td{padding:6px 7px;border:1px solid #DCE6E4;text-align:right}th{background:#EDF2F1}'+
+    'tr.g td{background:#014A59;color:#fff;font-weight:bold}'+
+    'tr.t td{background:#F3F7F6;font-weight:bold}'+
+    'tr.T td{background:#E3F3F1;font-weight:bold;font-size:12.5px}'+
+    '.ph a{color:#0E877E;direction:ltr;display:inline-block}'+
+    '.ft{display:flex;justify-content:space-between;margin-top:24px;font-size:12px}'+
+    '.ft b{display:block;margin-top:20px}'+
+    '@media print{.ph a{color:#000;text-decoration:none}}'+
+    '</style></head><body>'+
+    '<div class="hd"><h1>'+esc(DB.meta.name||"")+' — '+esc(DB.meta.subject||"")+'</h1>'+
+    '<div style="font-size:14px;font-weight:bold">تقرير تحصيل اليوم</div>'+
+    '<div style="font-size:11.5px;color:#6A7F80">'+esc(DAYS[dowOf(d)])+' · '+fmtD(d)+'</div></div>'+
+    '<div class="sum">'+
+      '<div>مستحق اليوم<b>'+n(S.dueToday)+' ج</b></div>'+
+      '<div>متأخرات سابقة<b>'+n(S.arrearsBefore)+' ج</b></div>'+
+      '<div>إجمالي الخصومات<b>'+n(S.disc)+' ج</b></div>'+
+      '<div>التحصيل الفعلي اليوم<b>'+n(S.gotAll)+' ج</b></div>'+
+      '<div>المتبقي<b>'+n(S.rest)+' ج</b></div>'+
+      '<div>بالكامل · جزء · لم يدفع<b>'+S.nPaid+' · '+S.nPartial+' · '+S.nUnpaid+'</b></div>'+
+    '</div>'+
+    '<table><thead><tr><th>الطالب</th><th>ولي الأمر (واتساب)</th><th>النظام</th>'+
+    '<th>المستحق الأصلي</th><th>الخصم</th><th>صافي المستحق</th><th>المدفوع سابقًا</th>'+
+    '<th>المحصّل اليوم</th><th>المتبقي</th><th>حالة السداد</th></tr></thead><tbody>'+body+
+    (order.length? '<tr class="T"><td colspan="3">الإجمالي العام</td>'+
+      '<td>'+n(S.gross)+'</td><td>'+n(S.disc)+'</td><td>'+n(S.net)+'</td><td>'+n(pb)+'</td>'+
+      '<td>'+n(S.got)+'</td><td>'+n(S.rest)+'</td><td></td></tr>' : '')+
+    '</tbody></table>'+
+    (S.gotAll - S.got > 0.5 ? '<div style="font-size:11.5px;margin-top:8px">+ '+n(S.gotAll-S.got)+
+      ' ج دفعات مقدّمة أو لطلاب خرجوا من مجموعاتهم — داخلة في التحصيل الفعلي.</div>' : '')+
+    '<div style="font-size:11px;color:#6A7F80;margin-top:8px">دوس على رقم ولي الأمر عشان تفتح واتساب برسالة المتبقي جاهزة.</div>'+
+    '<div class="ft"><span>التاريخ<b>'+fmtD(today())+'</b></span>'+
+    '<span>توقيع المدرّس<b>................</b></span></div></body></html>';
+}
+function printCollect(d){
+  d = d || today();
+  var w = window.open("","_blank");
+  if(!w){ toast("اسمح بالنوافذ المنبثقة"); return; }
+  w.document.write(collectReportHTML(d));
+  w.document.close();
+  setTimeout(function(){ try{ w.print(); }catch(e){} }, 400);
+}
+
+/* ============================================================
+   رسالة المستحق لولي الأمر — بالمبالغ من الكشف نفسه
+   ============================================================ */
+function waDueData(s, gid){
+  var F = finSummary(s.id);
+  var rows = F.rows.filter(function(R){ return R.rest>0 && (!gid || R.gid===gid); });
+  var o = { rows:rows, gross:0, disc:0, net:0, paid:0, rest:0, groups:[], whats:[], reasons:[], date:"" };
+  rows.forEach(function(R){
+    o.gross+=R.gross; o.disc+=R.disc; o.net+=R.amount; o.paid+=R.paidAmt; o.rest+=R.rest;
+    var g = groupById(R.gid);
+    if(g && o.groups.indexOf(g.name)<0) o.groups.push(g.name);
+    o.whats.push(R.what);
+    (R.parts||[]).forEach(function(p){
+      var r2 = String(p.name).replace(/^خصم( الأسرة)? — /, "");
+      if(p.a>0 && o.reasons.indexOf(r2)<0) o.reasons.push(r2); });
+    if(!o.date || R.date < o.date) o.date = R.date;
+  });
+  o.monthly = rows.every(function(R){ return R.kind==="month"; });
+  return o;
+}
+function waDueText(s, gid){
+  var o = waDueData(s, gid);
+  if(!o.rows.length) return "";
+  var x = { amount:o.rest, month:o.whats.join("، "), group:o.groups.join(" · "),
+            gross:o.gross, disc:o.disc, net:o.net, paid:o.paid, rest:o.rest, due:o.date };
+  /* صيغة المدرس الخاصة لو كاتب واحدة */
+  if(DB.meta.waDue && DB.meta.waDue.trim()) return waMsg("due", s, x);
+  var L = ["السلام عليكم، ولي أمر الطالب "+s.name+"."];
+  if(o.groups.length) L.push("المجموعة: "+o.groups.join(" · "));
+  L.push("المستحق: "+o.whats.join("، "));
+  L.push((o.monthly? "قيمة الاشتراك: " : "المستحق الأصلي: ")+money(o.gross));
+  if(o.disc > 0){
+    L.push("الخصم: "+money(o.disc)+(o.reasons.length? " ("+o.reasons.join(" · ")+")" : ""));
+    L.push("صافي المستحق: "+money(o.net));
+  }
+  L.push("المدفوع: "+money(o.paid));
+  L.push("المتبقي: "+money(o.rest));
+  L.push("تاريخ الاستحقاق: "+fmtD(o.date));
+  L.push("يرجى مراجعة المبلغ المتبقي.");
+  L.push(DB.meta.name || "");
+  return L.join("\n");
+}
+function waFamText(f){
+  var F = famStatement(f.id);
+  var L = ["السلام عليكم"+(f.guard? "، "+f.guard : "")+"."];
+  L.push("كشف حساب "+f.name+":");
+  F.kids.forEach(function(k){
+    if(k.F.exempt){ L.push("• "+k.s.name+": معفي"); return; }
+    L.push("• "+k.s.name+": المستحق "+money(k.F.gross)+
+      (k.F.disc? " − خصم "+money(k.F.disc)+" = "+money(k.F.net) : "")+
+      " · المدفوع "+money(k.F.paid)+" · المتبقي "+money(k.F.rest));
+  });
+  L.push("الإجمالي: المستحق "+money(F.net)+(F.disc? " (بعد خصم "+money(F.disc)+")" : "")+
+    " · المدفوع "+money(F.paid)+" · المتبقي "+money(F.rest));
+  if(F.rest>0) L.push("يرجى مراجعة المبلغ المتبقي.");
+  L.push(DB.meta.name || "");
+  return L.join("\n");
+}
+
+/* ============================================================
+   تعديل الرسالة قبل الإرسال + اختيار الرقم
+   الافتراضي رقم ولي الأمر، ورقم الطالب بديل لو مفيش.
+   مفيش إرسال تلقائي: بنفتح المحادثة والمدرس هو اللي يبعت.
+   ============================================================ */
+function modalWa(o){
+  var ph = o.phones || [];
+  var h = mh(o.title||"رسالة")+'<div class="mb">'+
+    '<div class="note" style="margin-bottom:11px">لـ<b>'+esc(o.name||"")+'</b>'+
+      (o.sub? ' — '+esc(o.sub) : '')+'</div>';
+  if(!ph.length){
+    h += '<label class="f"><span>مفيش رقم مسجّل — اكتب رقم الواتساب</span>'+
+      '<input type="tel" id="me_num" inputmode="tel" placeholder="01xxxxxxxxx" style="direction:ltr;text-align:right"></label>';
+  }else if(ph.length===1){
+    h += '<div class="note" style="margin-bottom:11px">'+esc(ph[0].l)+': '+
+      '<b style="direction:ltr;display:inline-block">'+esc(ph[0].n)+'</b>'+
+      '<input type="hidden" id="me_num" value="'+esc(ph[0].n)+'"></div>';
+  }else{
+    h += '<div style="margin-bottom:11px"><div class="mut" style="font-size:12.5px;font-weight:600;margin-bottom:5px">'+
+      'هتتبعت لمين؟</div>'+ph.map(function(p, i){
+        return '<label style="display:flex;gap:9px;align-items:center;padding:9px 11px;border:1px solid var(--line);'+
+          'border-radius:10px;margin-bottom:6px;cursor:pointer">'+
+          '<input type="radio" name="me_ph" value="'+esc(p.n)+'"'+(i===0?" checked":"")+' style="width:auto">'+
+          '<span style="flex:1">'+esc(p.l)+'</span>'+
+          '<b style="direction:ltr">'+esc(p.n)+'</b></label>';
+      }).join("")+'</div>';
+  }
+  h += '<label class="f"><span>نص الرسالة — تقدر تعدّله</span>'+
+      '<textarea id="me_t" style="min-height:190px;line-height:1.8">'+esc(o.text||"")+'</textarea></label>'+
+    '<div class="note">الرسالة هتتفتح في واتساب جاهزة، وانت اللي تضغط إرسال — مفيش حاجة بتتبعت لوحدها.</div>'+
+    '</div>'+
+    '<div class="mf"><button class="btn ghost" data-act="close">إلغاء</button>'+
+    '<button class="btn wa" data-act="meSend" data-s="'+esc(o.sid||"")+'">✆ افتح واتساب</button></div>';
+  openModal(h);
+}
+function modalMsgEdit(s, text, title){
+  modalWa({ title:title, name:s.name, sub:(s.guard? "ولي الأمر: "+s.guard : ""),
+            phones:stuPhones(s), text:text, sid:s.id });
+}
+
+/* ============================================================
+   نافذة الدفع — كشف واضح + دفع كامل أو جزئي
+   المدرس بيكتب اللي استلمه فعلًا. لو أقل من المتبقي، المستحق
+   بيفضل مفتوح بحالة «دفع جزءًا من المبلغ».
+   ============================================================ */
+function modalPay(s, g, dues, d, title, opt){
+  opt = opt || {};
+  d = d || today();
+  var rest = 0, gross = 0, disc = 0, net = 0, paid = 0;
+  dues.forEach(function(x){
+    rest += num(x.rest); gross += num(x.gross!==undefined? x.gross : x.amount);
+    disc += num(x.disc); net += num(x.amount); paid += num(x.paidAmt);
+  });
+  var hasToday = dues.some(function(x){ return x.date===d && x.rest>0; });
+  var hasOld   = dues.some(function(x){ return x.date< d && x.rest>0; });
+  UI.pay = { sid:s.id, d:d, upto:opt.upto || d, from:opt.from || "",
+             net:net, paid:paid, rest:rest,
+             rows:dues.map(function(x){ return { id:x.id, what:x.what, date:x.date, rest:num(x.rest) }; }) };
+  var amt = opt.amount===undefined ? rest : opt.amount;
+  var h = mh(title || ("دفع — "+s.name))+'<div class="mb">'+
+    '<div class="note" style="margin-bottom:11px"><b>'+esc(s.name)+'</b>'+
+      ' · '+esc(payModeName(payModeOf(s)))+(g? ' · '+esc(g.name) : '')+'</div>'+
+    finGrid([
+      ["المستحق الأصلي", money(gross)],
+      disc? ["الخصم", discCell(disc), "warn"] : null,
+      disc? ["صافي المستحق", money(net)] : null,
+      ["المدفوع سابقًا", money(paid), paid? "ok":""],
+      ["المتبقي", money(rest), rest? "bad":"ok"]
+    ])+
+    '<div style="border:1px solid var(--line);border-radius:11px;overflow:hidden;margin:11px 0">'+
+      dues.map(function(x){
+        var ps = paysOfRow(x);
+        return '<div style="padding:9px 11px;border-bottom:1px solid var(--line2);font-size:13px">'+
+          '<div style="display:flex;align-items:center;gap:8px">'+
+            '<span style="flex:1"><b>'+esc(x.what)+'</b><br>'+
+              '<span class="mut">استحقاق '+fmtD(x.date)+' · '+(x.kind==="ses"?"حصة":"شهري")+
+              (x.date<d && x.rest>0? ' · <span style="color:var(--bad)">متأخر</span>' : '')+
+              (x.date===d? ' · مستحق اليوم' : '')+'</span></span>'+
+            stTag(x.st)+
+            '<span class="tag '+(x.rest?"bad":"ok")+'">'+(x.rest? "باقي "+money(x.rest) : "✓")+'</span></div>'+
+          (num(x.disc)>0 || num(x.paidAmt)>0
+            ? '<div class="mut" style="font-size:12px;margin-top:4px">الأصلي '+money(x.gross)+
+              (num(x.disc)>0? ' − خصم '+money(x.disc)+' = '+money(x.amount) : '')+
+              (num(x.paidAmt)>0? ' · اتدفع '+money(x.paidAmt) : '')+'</div>' : '')+
+          ps.map(function(p){
+            return '<div style="display:flex;align-items:center;gap:8px;margin-top:5px;font-size:12.5px">'+
+              '<span style="flex:1;color:var(--ok)">✓ دفعة '+money(p.amount)+' · '+fmtD(p.date)+
+              (p.note? ' · '+esc(p.note) : '')+'</span>'+
+              '<button class="btn ghost sm" data-act="voidAsk" data-p="'+p.id+'" '+
+                'style="padding:3px 9px;font-size:11.5px;color:var(--bad)">إلغاء الدفعة</button></div>';
+          }).join("")+
+          '</div>';
+      }).join("")+'</div>';
+  if(rest > 0){
+    h += '<label class="f"><span>المبلغ المدفوع فعلًا</span>'+
+        '<input type="number" id="py_a" inputmode="decimal" min="0" step="any" value="'+esc(amt===""?"":amt)+'" '+
+        'placeholder="اكتب المبلغ" style="font-size:20px;text-align:center;font-weight:700"></label>'+
+      '<div class="row" style="margin-bottom:10px">'+
+        '<button class="btn ghost sm" data-act="pySet" data-v="'+rest+'">المتبقي كله ('+money(rest)+')</button>'+
+        (rest>1? '<button class="btn ghost sm" data-act="pySet" data-v="'+Math.round(rest/2)+'">النص ('+money(Math.round(rest/2))+')</button>' : '')+
+      '</div>'+
+      (hasToday && hasOld
+        ? '<label class="f"><span>الدفعة تتوجّه لإيه الأول؟</span><select id="py_o">'+
+            '<option value="old">المتأخرات القديمة أولًا (الأقدم فالأحدث)</option>'+
+            '<option value="today">مستحق اليوم أولًا</option></select></label>' : '')+
+      '<div class="note" id="py_pv" style="margin-bottom:10px"></div>'+
+      '<label class="f"><span>ملاحظة على الدفعة (اختياري)</span>'+
+        '<input type="text" id="py_n" placeholder="مثال: استلمتها من الأم"></label>';
+  }else{
+    h += '<div class="note ok">مفيش متبقي — المستحق متسدّد بالكامل.</div>';
+  }
+  h += '</div><div class="mf"><button class="btn ghost" data-act="payBack">رجوع</button>'+
+    (rest>0 ? '<button class="btn ghost" data-act="noPay" data-s="'+s.id+'"'+(g?' data-g="'+g.id+'"':'')+
+               ' style="color:var(--bad)">✕ لم يسدد</button>'+
+              '<button class="btn" data-act="savePay">✓ سجّل الدفع</button>' : '')+'</div>';
+  openModal(h);
+  $("#modal").dataset.sid = s.id;
+  payPreview();
+  if(opt.focus){ var i = document.getElementById("py_a"); if(i) setTimeout(function(){ i.focus(); }, 60); }
+}
+/* معاينة حيّة: بعد الدفعة دي هيبقى المدفوع كام والمتبقي كام */
+function payPreview(){
+  var box = document.getElementById("py_pv");
+  var P = UI.pay;
+  if(!box || !P) return;
+  var a = num(val("py_a"), 0);
+  if(a <= 0){
+    box.className = "note";
+    box.innerHTML = 'اكتب المبلغ اللي استلمته — لو أقل من المتبقي هيتسجّل <b>دفعة جزئية</b> والباقي يفضل على الطالب.';
+    return;
+  }
+  var rows = P.rows.filter(function(x){ return x.rest>0; });
+  if(val("py_o")==="today")
+    rows = rows.filter(function(x){ return x.date===P.d; }).concat(rows.filter(function(x){ return x.date!==P.d; }));
+  var left = a, parts = [];
+  rows.forEach(function(x){
+    if(left<=0) return;
+    var t = Math.min(left, x.rest); left -= t;
+    parts.push(esc(x.what)+' <b>'+money(t)+'</b>'+(t < x.rest-0.001 ? ' (جزء)' : ''));
+  });
+  var done = a - left;
+  var after = Math.max(0, P.rest - done);
+  box.className = "note "+(after>0 ? "warn" : "ok");
+  box.innerHTML =
+    (P.paid? 'المدفوع سابقًا <b>'+money(P.paid)+'</b> + ' : '')+'الدفعة الجديدة <b>'+money(done)+'</b>'+
+    ' = إجمالي المدفوع <b>'+money(P.paid+done)+'</b><br>'+
+    'المتبقي بعدها: <b>'+money(after)+'</b>'+(after>0 ? ' — الحالة: دفع جزءًا من المبلغ' : ' — يتسدّد بالكامل ✓')+
+    (parts.length>1 || rows.length>1 ? '<br><span style="font-size:12px">التوجيه: '+parts.join(" · ")+'</span>' : '')+
+    (left>0.004 ? '<br><b style="color:var(--bad)">المبلغ أكبر من المتبقي بـ'+money(left)+' — الزيادة مش هتتسجّل.</b>' : '');
+}
+/* منين اتفتحت نافذة الدفع — عشان نرجع لنفس المكان */
+function payFromOf(el){
+  if(!el || !el.closest || !el.closest("#modal")) return "";
+  if(document.getElementById("lg_root")) return "ledger";
+  if(document.getElementById("du_root")) return "dues:"+(document.getElementById("du_root").dataset.w||"today");
+  if(document.getElementById("ses_q")) return "ses";
+  if(UI.pay && UI.pay.from) return UI.pay.from;
+  return "";
+}
+function payReturn(from, sid){
+  if(from==="ses" && UI.sesG){
+    openModal(sesModalHTML(UI.sesG, UI.sesD));
+    requestAnimationFrame(function(){
+      var b2 = document.querySelector("#modal .mb");
+      if(b2) b2.scrollTop = UI.sesY || 0;
+    });
+  }else if(from==="ledger" && sid && studentById(sid)) modalLedger(sid);
+  else if(from && from.indexOf("dues:")===0) modalDues(from.slice(5));
+  else closeModal();
+}
+/* فتح نافذة الدفع لطالب: كل المفتوح، أو مجموعة واحدة، أو مستحق واحد */
+function openPay(s, o){
+  o = o || {};
+  if(!s) return;
+  var d = o.d || today();
+  if(isExemptOn(s, d)){ toast("الطالب معفي من الدفع"); return; }
+  var rows;
+  if(o.id){
+    var R = finRowById(s.id, o.id, o.upto);
+    rows = R ? [R] : [];
+  }else{
+    rows = duesOf(s.id, d).filter(function(x){
+      return x.date<=d && x.rest>0 && (!o.gid || x.gid===o.gid); });
+    if(!rows.length)
+      rows = duesOf(s.id, d).filter(function(x){
+        return x.date<=d && num(x.paidAmt)>0 && (!o.gid || x.gid===o.gid); }).slice(-3);
+  }
+  if(!rows.length){ toast("مفيش مستحقات"); return; }
+  var g = o.gid ? groupById(o.gid) : (rows.length===1 ? groupById(rows[0].gid) : null);
+  var upto = d;
+  rows.forEach(function(x){ if(x.date > upto) upto = x.date; });
+  var anyRest = rows.some(function(x){ return x.rest>0; });
+  modalPay(s, g, rows, d,
+    o.title || (anyRest ? (o.part ? "سداد جزء — " : "سداد — ")+s.name : "دفعات "+s.name),
+    { amount:o.part ? "" : undefined, focus:!!o.part, upto:upto, from:o.from||"" });
+}
+
+/* ---------- لم يسدد ---------- */
+function modalNoPay(s, gid, from){
+  var P = payStatus(s.id) || { total:0 };
+  var y = new Date(); y.setDate(y.getDate()+7);
+  openModal(mh("لم يسدد — "+s.name)+'<div class="mb">'+
+    '<div class="note bad" style="margin-bottom:11px">المتبقي عليه <b>'+money(P.total)+'</b>. '+
+      'هيتسجّل إنك طالبته النهاردة ومدفعش — <b>من غير ما الرصيد يتغيّر ولا يتعمل مستحق جديد</b>.</div>'+
+    '<label class="f"><span>السبب / اللي قاله (اختياري)</span>'+
+      '<input type="text" id="np_r" placeholder="مثال: هيدفع الحصة الجاية"></label>'+
+    '<label class="f"><span>وعد بالسداد يوم (اختياري)</span>'+
+      '<input type="date" id="np_d" min="'+today()+'" value=""></label>'+
+    '<label style="display:flex;gap:9px;align-items:center;margin-bottom:6px;cursor:pointer">'+
+      '<input type="checkbox" id="np_rem" checked style="width:auto">'+
+      '<span>ضيف تذكير في اليوم ده عشان أتابع</span></label>'+
+    '</div><div class="mf"><button class="btn ghost" data-act="payBack">رجوع</button>'+
+    '<button class="btn bad" data-act="saveNoPay" data-s="'+s.id+'" data-g="'+esc(gid||"")+'">سجّل «لم يسدد»</button></div>');
+  UI.pay = UI.pay && UI.pay.sid===s.id ? UI.pay : { sid:s.id };
+  UI.pay.from = from || UI.pay.from || "";
+}
+
+/* ---------- إلغاء دفعة (عكس معاملة) ---------- */
+var VOID_REASONS = ["اتسجّلت بالخطأ","المبلغ مكتوب غلط","اتسجّلت على طالب تاني","اترجّع المبلغ لولي الأمر"];
+function modalVoid(p, from){
+  var s = studentById(p.sid);
+  openModal(mh("إلغاء دفعة")+'<div class="mb">'+
+    '<div class="note bad" style="margin-bottom:11px"><b>'+money(p.amount)+'</b> — '+esc(payWhat(p))+
+      '<br>'+esc(s? s.name : "")+' · اتسجّلت '+fmtD(p.date)+'</div>'+
+    '<div class="note" style="margin-bottom:11px">الدفعة <b>مش هتتمسح</b> — هتتنقل لسجل «معاملات ملغاة» '+
+      'بسببها وتاريخها، والمتبقي على الطالب هيرجع يتحسب من غيرها.</div>'+
+    '<label class="f"><span>سبب الإلغاء</span><select id="vd_r">'+
+      VOID_REASONS.map(function(r){ return '<option>'+esc(r)+'</option>'; }).join("")+
+      '<option value="">سبب تاني…</option></select></label>'+
+    '<label class="f"><span>تفاصيل (اختياري — مطلوبة لو اخترت «سبب تاني»)</span>'+
+      '<input type="text" id="vd_t"></label>'+
+    '</div><div class="mf"><button class="btn ghost" data-act="payBack">رجوع</button>'+
+    '<button class="btn bad" data-act="voidGo" data-p="'+p.id+'">إلغاء الدفعة</button></div>');
+  UI.pay = { sid:p.sid, from:from||"" };
+}
+
+/* ============================================================
+   السجل المالي للطالب — كشف حساب كامل
+   مستحق بمستحق: التاريخ · الأصلي · الخصم · الصافي · كل دفعة
+   بتاريخها · إجمالي المدفوع · المتبقي · الحالة.
+   ============================================================ */
+function ledgerData(sid){
+  var s = studentById(sid);
+  var rows = finRows(sid, today(), true);
+  var linked = {};
+  rows.forEach(function(R){ R.pays = paysOfRow(R); R.pays.forEach(function(p){ linked[p.id] = 1; }); });
+  var extra = DB.pays.filter(function(p){ return p.sid===sid && !linked[p.id]; })
+    .sort(function(a,b){ return (a.at||0)-(b.at||0); });
+  return {
+    s:s, F:finSummary(sid), rows:rows, extra:extra,
+    discs:(DB.discounts||[]).filter(function(dc){
+      return dc.scope==="fam" ? (!!s.famId && dc.famId===s.famId) : dc.sid===sid; })
+      .sort(function(a,b){ return (b.at||0)-(a.at||0); }),
+    voids:(DB.voids||[]).filter(function(v){ return v.sid===sid; })
+      .sort(function(a,b){ return (b.voidAt||0)-(a.voidAt||0); }),
+    notes:(DB.payNotes||[]).filter(function(n){ return n.sid===sid; })
+      .sort(function(a,b){ return (b.at||0)-(a.at||0); })
+  };
+}
+function discRowHTML(dc, sid){
+  var live = discLive(dc);
+  var state = dc.off ? '<span class="tag bad">محذوف</span>'
+            : (dc.repeat==="once" ? '<span class="tag">مرة واحدة</span>'
+            : (live ? '<span class="tag ok">شغال</span>' : '<span class="tag">انتهى</span>'));
+  var g = dc.gid ? groupById(dc.gid) : null;
+  return '<div style="padding:10px 12px;border-bottom:1px solid var(--line2);font-size:13px">'+
+    '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'+
+      '<span style="flex:1;min-width:150px"><b>'+esc(discName(dc))+'</b> · '+esc(discValueTxt(dc))+
+        (dc.type==="total" && sid ? ' <span class="mut">(نصيبه '+money((dc.shares||{})[sid])+')</span>' : '')+
+        '<br><span class="mut">'+esc(discPeriodTxt(dc))+(g? ' · '+esc(g.name) : '')+
+        ((dc.incl||[]).length? ' · مطبّق على '+ar(dc.incl.length)+' مستحق قديم باختيارك' : '')+
+        (dc.stack? ' · يتجمع مع خصم الأسرة' : '')+
+        (dc.note? '<br>✎ '+esc(dc.note) : '')+
+        (dc.off? '<br>اتحذف '+fmtD(iso(new Date(dc.off.at)))+(dc.off.reason? ' — '+esc(dc.off.reason) : '') : '')+
+      '</span></span>'+state+'</div>'+
+    (dc.off || dc.scope==="fam" ? (dc.scope==="fam" && !dc.off
+        ? '<div class="mut" style="font-size:11.5px;margin-top:4px">بيتعدّل من صفحة الأسرة</div>' : '')
+      : '<div class="row" style="margin-top:7px">'+
+        (live? '<button class="btn ghost sm" data-act="discStop" data-i="'+dc.id+'" style="padding:5px 10px">'+
+               'إيقاف من النهاردة</button>' : '')+
+        '<button class="btn ghost sm" data-act="discDel" data-i="'+dc.id+'" '+
+          'style="padding:5px 10px;color:var(--bad)">حذف الخصم</button></div>')+
+    '</div>';
+}
+function modalLedger(sid){
+  var L = ledgerData(sid), s = L.s;
+  if(!s) return;
+  var F = L.F;
+  var h = mh("السجل المالي — "+s.name)+'<div class="mb" id="lg_root" data-s="'+sid+'">'+
+    '<div class="note" style="margin-bottom:10px"><b>'+esc(s.name)+'</b> · '+
+      esc(F.exempt ? "معفي من الدفع" : payModeName(payModeOf(s)))+
+      (studentGroups(s).length? '<br>'+esc(studentGroups(s).map(function(g){
+        return g.name+" ("+money(g.fee)+")"; }).join(" · ")) : '')+'</div>';
+  if(!F.exempt){
+    h += finGrid([
+      ["المستحق الأصلي", money(F.gross)],
+      ["الخصم", discCell(F.disc), F.disc? "warn":""],
+      ["صافي المستحق", money(F.net)],
+      ["إجمالي المدفوع", money(F.paid), F.paid? "ok":""],
+      ["المتبقي", money(F.rest), F.rest? "bad":"ok"]
+    ])+
+    '<div style="display:flex;align-items:center;gap:8px;margin:9px 0 11px;flex-wrap:wrap">'+
+      '<span class="mut" style="font-size:12.5px">حالة السداد:</span>'+stTag(F.st, true)+
+      (F.adv>0 ? '<span class="tag ok">+ '+money(F.adv)+' مدفوع مقدّم</span>' : '')+
+      (F.credit>0 ? '<span class="tag warn">له '+money(F.credit)+' زيادة</span>' : '')+'</div>'+
+    payBar(s, { rest:F.rest, disc:true, wa:true });
+  }else{
+    h += '<div class="note ok" style="margin-bottom:10px"><b>★ معفي من الدفع</b> — مفيش مستحقات ولا تحصيل ولا تذكيرات مالية. السجل القديم محفوظ تحت.</div>';
+  }
+
+  /* المستحقات */
+  h += '<h3 style="font-size:14.5px;margin:15px 0 8px">المستحقات والدفعات</h3>';
+  if(!L.rows.length) h += '<div class="note">مفيش مستحقات متسجّلة لحد النهاردة.</div>';
+  L.rows.slice().reverse().forEach(function(R){
+    var g = groupById(R.gid);
+    h += '<div class="lrow" style="border:1px solid var(--line);border-radius:11px;margin-bottom:9px;overflow:hidden">'+
+      '<div style="display:flex;align-items:center;gap:8px;padding:9px 12px;background:var(--paper)">'+
+        '<span style="flex:1"><b>'+esc(R.what)+'</b>'+(g? ' <span class="mut">· '+esc(g.name)+'</span>' : '')+
+          '<br><span class="mut" style="font-size:12px">تاريخ الاستحقاق: '+fmtD(R.date)+'</span></span>'+
+        stTag(R.st)+'</div>'+
+      '<div style="padding:9px 12px">'+
+      finGrid([
+        ["المستحق الأصلي", money(R.gross)],
+        ["الخصم", discCell(R.disc), R.disc? "warn":""],
+        ["صافي المستحق", money(R.amount)],
+        ["إجمالي المدفوع", money(R.paidAmt), R.paidAmt? "ok":""],
+        ["المتبقي", money(R.rest), R.rest? "bad":"ok"]
+      ])+
+      (R.parts||[]).map(function(p){
+        return '<div style="font-size:12.5px;margin-top:6px'+(p.skipped?';color:var(--mut)':'')+'">'+
+          (p.skipped ? '○ '+esc(p.name)+' ('+money(p.would)+') — <b>مش مطبّق</b>: '+esc(p.why)
+                     : '٪ '+esc(p.name)+': <b>− '+money(p.a)+'</b>')+'</div>';
+      }).join("")+
+      R.pays.map(function(p){
+        return '<div style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:12.5px">'+
+          '<span style="flex:1;color:var(--ok)">✓ دفعة <b>'+money(p.amount)+'</b> · '+fmtD(p.date)+
+            (p.note? ' · '+esc(p.note) : '')+'</span>'+
+          '<button class="btn ghost sm" data-act="voidAsk" data-p="'+p.id+'" '+
+            'style="padding:3px 9px;font-size:11.5px;color:var(--bad)">إلغاء</button></div>';
+      }).join("")+
+      (R.over>0 ? '<div style="font-size:12.5px;margin-top:6px;color:var(--warn)">مدفوع زيادة عن الصافي بـ<b>'+
+        money(R.over)+'</b></div>' : '')+
+      (R.rest>0 && !F.exempt ? '<div class="row" style="margin-top:8px">'+
+        '<button class="btn ok sm" data-act="payOne" data-s="'+sid+'" data-i="'+esc(R.id)+'" style="padding:6px 11px">'+
+          '✓ سداد المتبقي ('+money(R.rest)+')</button>'+
+        '<button class="btn ghost sm" data-act="payOne" data-s="'+sid+'" data-i="'+esc(R.id)+'" data-part="1" '+
+          'style="padding:6px 11px">◔ سداد جزء</button></div>' : '')+
+      '</div></div>';
+  });
+
+  if(L.extra.length){
+    h += '<h3 style="font-size:14.5px;margin:15px 0 8px">دفعات مقدّمة</h3>'+
+      '<div style="border:1px solid var(--line);border-radius:11px;overflow:hidden">'+
+      L.extra.map(function(p){
+        return '<div style="display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line2);font-size:13px">'+
+          '<span style="flex:1"><b>'+money(p.amount)+'</b> — '+esc(payWhat(p))+
+            '<br><span class="mut">'+fmtD(p.date)+' · لمستحق لسه ما جاش ميعاده</span></span>'+
+          '<button class="btn ghost sm" data-act="voidAsk" data-p="'+p.id+'" '+
+            'style="padding:3px 9px;font-size:11.5px;color:var(--bad)">إلغاء</button></div>';
+      }).join("")+'</div>';
+  }
+
+  /* الخصومات */
+  h += '<h3 style="font-size:14.5px;margin:15px 0 8px">الخصومات</h3>';
+  if(!L.discs.length) h += '<div class="note">مفيش خصومات على الطالب ده.</div>';
+  else h += '<div style="border:1px solid var(--line);border-radius:11px;overflow:hidden">'+
+    L.discs.map(function(dc){ return discRowHTML(dc, sid); }).join("")+'</div>';
+
+  if(L.notes.length){
+    h += '<h3 style="font-size:14.5px;margin:15px 0 8px">متابعات «لم يسدد»</h3>'+
+      '<div style="border:1px solid var(--line);border-radius:11px;overflow:hidden">'+
+      L.notes.slice(0,15).map(function(n){
+        return '<div style="padding:9px 12px;border-bottom:1px solid var(--line2);font-size:13px">'+
+          '<b>'+fmtD(n.date)+'</b> — المتبقي وقتها '+money(n.rest)+
+          (n.reason? '<br><span class="mut">'+esc(n.reason)+'</span>' : '')+
+          (n.promise? '<br><span class="mut">وعد بالسداد '+fmtD(n.promise)+'</span>' : '')+'</div>';
+      }).join("")+'</div>';
+  }
+  if(L.voids.length){
+    h += '<h3 style="font-size:14.5px;margin:15px 0 8px">معاملات ملغاة</h3>'+
+      '<div style="border:1px solid var(--line);border-radius:11px;overflow:hidden">'+
+      L.voids.map(function(v){
+        return '<div style="padding:9px 12px;border-bottom:1px solid var(--line2);font-size:13px">'+
+          '<span style="text-decoration:line-through">'+money(v.amount)+'</span> — '+esc(payWhat(v))+
+          '<br><span class="mut">اتسجّلت '+fmtD(v.date)+' · اتلغت '+fmtD(v.voidDate)+
+          ' · السبب: '+esc(v.voidReason)+'</span></div>';
+      }).join("")+'</div>';
+  }
+  h += '</div><div class="mf"><button class="btn ghost" data-act="close">إغلاق</button>'+
+    '<button class="btn" data-act="printLedger" data-s="'+sid+'">⎙ طباعة كشف الحساب</button></div>';
+  openModal(h);
+}
+function ledgerPrintHTML(sid){
+  var L = ledgerData(sid), s = L.s, F = L.F;
+  function n(v){ return Math.round(num(v)); }
+  var body = L.rows.map(function(R){
+    var g = groupById(R.gid);
+    return '<tr><td>'+fmtD(R.date)+'</td><td>'+esc(R.what)+(g? '<br><small>'+esc(g.name)+'</small>' : '')+'</td>'+
+      '<td>'+n(R.gross)+'</td>'+
+      '<td>'+(R.disc? n(R.disc)+'<br><small>'+esc((R.parts||[]).filter(function(p){ return p.a>0; })
+          .map(function(p){ return p.name; }).join(" · "))+'</small>' : '—')+'</td>'+
+      '<td>'+n(R.amount)+'</td>'+
+      '<td>'+(R.pays.length? R.pays.map(function(p){ return n(p.amount)+' ج — '+fmtD(p.date); }).join("<br>") : '—')+'</td>'+
+      '<td>'+n(R.paidAmt)+'</td><td><b>'+n(R.rest)+'</b></td>'+
+      '<td>'+esc((PAY_ST[R.st]||PAY_ST.none).t)+'</td></tr>';
+  }).join("") || '<tr><td colspan="9" style="text-align:center">مفيش مستحقات</td></tr>';
+  return '<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8">'+
+    '<title>كشف حساب — '+esc(s.name)+'</title><style>'+
+    'body{font-family:system-ui,sans-serif;padding:16px;color:#0E1A2B;max-width:950px;margin:0 auto}'+
+    '.hd{text-align:center;border-bottom:3px solid #014A59;padding-bottom:9px;margin-bottom:12px}'+
+    '.hd h1{font-size:18px;margin:0 0 3px;color:#014A59}'+
+    '.sum{display:flex;gap:8px;margin:12px 0;flex-wrap:wrap}'+
+    '.sum div{border:1px solid #DCE6E4;border-radius:9px;padding:7px 12px;font-size:11px;flex:1;min-width:100px}'+
+    '.sum b{display:block;font-size:16px}'+
+    'table{width:100%;border-collapse:collapse;font-size:11.5px;margin-top:10px}'+
+    'th,td{padding:6px 7px;border:1px solid #DCE6E4;text-align:right;vertical-align:top}th{background:#EDF2F1}'+
+    'small{color:#6A7F80}h2{font-size:13.5px;margin:16px 0 4px;color:#014A59}'+
+    '.ft{display:flex;justify-content:space-between;margin-top:24px;font-size:12px}'+
+    '.ft b{display:block;margin-top:20px}</style></head><body>'+
+    '<div class="hd"><h1>'+esc(DB.meta.name||"")+' — '+esc(DB.meta.subject||"")+'</h1>'+
+    '<div style="font-size:14px;font-weight:bold">كشف حساب الطالب: '+esc(s.name)+'</div>'+
+    '<div style="font-size:11.5px;color:#6A7F80">'+esc(s.grade||"")+' · '+
+      esc(F.exempt? "معفي من الدفع" : payModeName(payModeOf(s)))+' · '+fmtD(today())+'</div></div>'+
+    '<div class="sum"><div>المستحق الأصلي<b>'+n(F.gross)+' ج</b></div>'+
+      '<div>الخصم<b>'+n(F.disc)+' ج</b></div><div>صافي المستحق<b>'+n(F.net)+' ج</b></div>'+
+      '<div>إجمالي المدفوع<b>'+n(F.paid)+' ج</b></div><div>المتبقي<b>'+n(F.rest)+' ج</b></div>'+
+      '<div>حالة السداد<b style="font-size:13px">'+esc((PAY_ST[F.st]||PAY_ST.none).t)+'</b></div></div>'+
+    '<table><thead><tr><th>تاريخ الاستحقاق</th><th>المستحق</th><th>الأصلي</th><th>الخصم</th>'+
+    '<th>الصافي</th><th>الدفعات وتواريخها</th><th>إجمالي المدفوع</th><th>المتبقي</th><th>الحالة</th></tr></thead>'+
+    '<tbody>'+body+'</tbody></table>'+
+    (L.voids.length? '<h2>معاملات ملغاة</h2><table><thead><tr><th>المبلغ</th><th>عن</th><th>تاريخ التسجيل</th>'+
+      '<th>تاريخ الإلغاء</th><th>السبب</th></tr></thead><tbody>'+L.voids.map(function(v){
+        return '<tr><td>'+n(v.amount)+'</td><td>'+esc(payWhat(v))+'</td><td>'+fmtD(v.date)+'</td>'+
+          '<td>'+fmtD(v.voidDate)+'</td><td>'+esc(v.voidReason)+'</td></tr>'; }).join("")+'</tbody></table>' : '')+
+    '<div class="ft"><span>توقيع المدرّس<b>................</b></span>'+
+    '<span>توقيع ولي الأمر<b>................</b></span></div></body></html>';
+}
+function printLedger(sid){
+  var w = window.open("","_blank");
+  if(!w){ toast("اسمح بالنوافذ المنبثقة"); return; }
+  w.document.write(ledgerPrintHTML(sid));
+  w.document.close();
+  setTimeout(function(){ try{ w.print(); }catch(e){} }, 400);
+}
+
+/* ============================================================
+   الكشف المالي في ملف الطالب
+   ============================================================ */
+function finCardHTML(s){
+  var F = finSummary(s.id);
+  var live = discsFor(s).filter(function(dc){
+    if(dc.repeat!=="once") return discLive(dc);
+    /* مرة واحدة: بيفضل ظاهر لحد ما مستحقه يتقفل */
+    var hit = F.rows.filter(function(R){
+      return (R.parts||[]).some(function(p){ return p.id===dc.id && p.a>0; }); });
+    return !hit.length || hit.some(function(R){ return R.rest>0; });
+  });
+  var open = F.rows.filter(function(R){ return R.rest>0; });
+  var h = '<div class="card" id="finCard"><div class="hd"><h3>الكشف المالي</h3>'+stTag(F.st, true)+'</div><div class="bd">'+
+    finGrid([
+      ["المستحق الأصلي", money(F.gross)],
+      ["الخصم", discCell(F.disc), F.disc? "warn":""],
+      ["صافي المستحق", money(F.net)],
+      ["المدفوع", money(F.paid), F.paid? "ok":""],
+      ["المتبقي", money(F.rest), F.rest? "bad":"ok"]
+    ]);
+  var lines = [];
+  if(F.arrears>0 && F.dueToday>0)
+    lines.push('متأخرات سابقة <b>'+money(F.arrears)+'</b> · مستحق النهاردة <b>'+money(F.dueToday)+'</b>');
+  if(F.adv>0) lines.push('مدفوع مقدّم لمستحقات جاية: <b>'+money(F.adv)+'</b>');
+  if(F.credit>0) lines.push('<span style="color:var(--warn)">له <b>'+money(F.credit)+'</b> زيادة عن صافي المستحق</span>');
+  if(!F.rows.length) lines.push('لسه مفيش مستحقات — بتبدأ من تاريخ الانضمام أو بداية احتساب المجموعة.');
+  if(lines.length) h += '<div class="mut" style="font-size:12.5px;margin-top:8px;line-height:1.8">'+lines.join("<br>")+'</div>';
+  h += '<div style="margin-top:11px">'+payBar(s, { rest:F.rest, disc:true, wa:true })+'</div>';
+
+  if(live.length){
+    h += '<div class="sep"></div><div class="mut" style="font-size:12px;font-weight:600;margin-bottom:6px">خصومات الطالب</div>'+
+      live.map(function(dc){
+        return '<div style="display:flex;gap:8px;align-items:center;font-size:13px;margin-bottom:5px;flex-wrap:wrap">'+
+          '<span class="tag warn">٪</span><span style="flex:1;min-width:140px"><b>'+esc(discName(dc))+'</b> · '+
+          esc(dc.type==="total" ? money((dc.shares||{})[s.id])+" (نصيبه من "+money(dc.value)+")" : discValueTxt(dc))+
+          ' <span class="mut">· '+esc(discPeriodTxt(dc))+'</span></span></div>';
+      }).join("");
+  }
+  if(open.length){
+    h += '<div class="sep"></div><div class="mut" style="font-size:12px;font-weight:600;margin-bottom:6px">'+
+      'المستحقات المفتوحة ('+ar(open.length)+')</div>'+
+      '<div style="border:1px solid var(--line);border-radius:11px;overflow:hidden">'+
+      open.slice(0,12).map(function(R){
+        var g = groupById(R.gid);
+        return '<div style="display:flex;align-items:center;gap:8px;padding:9px 11px;border-bottom:1px solid var(--line2);'+
+          'font-size:13px;flex-wrap:wrap">'+
+          '<span style="flex:1;min-width:140px"><b>'+esc(R.what)+'</b>'+(g? ' <span class="mut">· '+esc(g.name)+'</span>':'')+
+            '<br><span class="mut" style="font-size:12px">استحقاق '+fmtD(R.date)+' · الأصلي '+money(R.gross)+
+            (R.disc? ' − خصم '+money(R.disc)+' = '+money(R.amount) : '')+
+            (R.paidAmt? ' · اتدفع '+money(R.paidAmt) : '')+'</span></span>'+
+          stTag(R.st)+'<span class="tag bad">'+money(R.rest)+'</span>'+
+          '<button class="btn ok sm" data-act="payOne" data-s="'+s.id+'" data-i="'+esc(R.id)+
+            '" style="padding:5px 10px">سدّد</button></div>';
+      }).join("")+'</div>';
+    if(open.length>12) h += '<div class="mut" style="font-size:12px;text-align:center;margin-top:6px">…وكمان '+
+      ar(open.length-12)+' — شوفهم في سجل المدفوعات</div>';
+  }
+  return h+'</div></div>';
+}
+/* شريط الشهور — حالة كل شهر من المستحق نفسه (مش من «فيه دفعة») */
+function monthStripHTML(s, g){
+  var start = num(DB.meta.startMonth, 9);
+  var now = new Date(), y = now.getFullYear();
+  var y0 = (now.getMonth()+1 >= start) ? y : y-1;
+  var ms = schoolMonths();
+  var last = ms[ms.length-1];
+  var lastY = last >= start ? y0 : y0+1;
+  var rows = finRows(s.id, lastY+"-"+String(last).padStart(2,"0")+"-31", true)
+    .filter(function(R){ return R.gid===g.id; });
+  var by = {};
+  rows.forEach(function(R){ by[R.mk] = R; });
+  var t = today();
+  return '<div class="months">'+ms.map(function(mi){
+    var mk = (mi >= start ? y0 : y0+1)+"-"+String(mi).padStart(2,"0");
+    var R = by[mk];
+    var cls = "next", tip = " — مش مستحق", act = "";
+    if(R){
+      act = ' data-act="payOne" data-s="'+s.id+'" data-i="'+esc(R.id)+'"';
+      if(R.st==="paid" || R.st==="none"){ cls = "paid"; tip = R.st==="none"? " — خصم كامل" : " — مدفوع بالكامل"; }
+      else if(R.st==="partial"){ cls = "part"; tip = " — مدفوع جزء، باقي "+Math.round(R.rest)+" ج"; }
+      else if(R.date <= t){ cls = "due"; tip = " — متأخر "+Math.round(R.rest)+" ج"; }
+      else{ cls = "next"; tip = " — لسه ما جاش (تقدر تدفعه مقدّم)"; }
+    }else if(paidForMonth(s.id, g.id, mi) > 0){ cls = "paid"; tip = " — مدفوع"; }
+    return '<button class="mo '+cls+'"'+act+' title="'+esc(MONTHS[mi-1])+esc(tip)+'">'+ar(mi)+'</button>';
+  }).join("")+'</div>'+
+  '<div style="display:flex;gap:9px;flex-wrap:wrap;margin-top:9px;font-size:11.5px" class="mut">'+
+    '<span><span class="mo paid" style="width:12px;height:12px;display:inline-block;vertical-align:-2px"></span> مدفوع بالكامل</span>'+
+    '<span><span class="mo part" style="width:12px;height:12px;display:inline-block;vertical-align:-2px"></span> مدفوع جزء</span>'+
+    '<span><span class="mo due" style="width:12px;height:12px;display:inline-block;vertical-align:-2px"></span> متأخر</span>'+
+    '<span><span class="mo next" style="width:12px;height:12px;display:inline-block;vertical-align:-2px"></span> لسه ما جاش</span>'+
+  '</div>';
+}
+
+/* ============================================================
+   نافذة الخصم الخاص لطالب
+   ============================================================ */
+function modalDisc(sid, from){
+  var s = studentById(sid);
+  if(!s) return;
+  if(isExempt(s)){ toast("الطالب معفي من الدفع — مفيش مستحق يتخصم منه"); return; }
+  var gs = studentGroups(s);
+  var ses = payModeOf(s)==="ses";
+  var open = duesOf(sid, today()).filter(function(R){ return R.rest>0; });
+  var cur = discsFor(s).filter(function(dc){ return discLive(dc); });
+  var famLive = cur.filter(function(dc){ return dc.scope==="fam"; });
+  var h = mh("إضافة خصم — "+s.name)+'<div class="mb" id="dc_root">'+
+    '<div class="note" style="margin-bottom:11px"><b>'+esc(s.name)+'</b> · '+esc(payModeName(payModeOf(s)))+
+      (gs.length? '<br>'+esc(gs.map(function(g){ return g.name+" — "+money(g.fee)+(ses?"/حصة":"/شهر"); }).join(" · ")) : '')+
+      '<br>سعر المجموعة بيفضل زي ما هو لباقي الطلاب — الخصم بيتسجّل على الطالب ده بس.</div>';
+  if(cur.length)
+    h += '<div class="note warn" style="margin-bottom:11px"><b>عنده خصم شغال دلوقتي:</b><br>'+
+      cur.map(function(dc){ return '• '+esc(discName(dc))+' · '+esc(discValueTxt(dc)); }).join("<br>")+
+      '<br><span style="font-size:12px">'+(famLive.length
+        ? 'لو ضفت خصم فردي مع خصم الأسرة، <b>بيتطبّق الأكبر فيهم بس</b> — إلا لو علّمت «يتجمع» تحت.'
+        : 'الخصم الجديد هيتجمع مع الخصم الفردي الموجود. لو قصدك تغيّره، أوقف القديم الأول من السجل.')+'</span></div>';
+  h += '<div class="grid2">'+
+    '<label class="f"><span>نوع الخصم</span><select id="dc_type">'+
+      '<option value="fixed">مبلغ ثابت (جنيه)</option><option value="pct">نسبة مئوية ٪</option></select></label>'+
+    '<label class="f"><span>القيمة '+(ses? "(على كل حصة)" : "(على كل اشتراك شهري)")+'</span>'+
+      '<input type="number" id="dc_val" inputmode="decimal" min="0" step="any" placeholder="مثال: 50"></label>'+
+    '</div>'+
+    '<div class="grid2">'+
+    '<label class="f"><span>سبب الخصم</span><select id="dc_reason">'+
+      DISC_REASONS.filter(function(r){ return r!=="خصم إخوة"; }).map(function(r){
+        return '<option>'+esc(r)+'</option>'; }).join("")+
+      '<option value="">سبب تاني…</option></select></label>'+
+    '<label class="f"><span>سبب تاني (لو مش في القايمة)</span><input type="text" id="dc_reason2"></label>'+
+    '</div>'+
+    '<label class="f"><span>الخصم لمرة واحدة ولا متكرر؟</span><select id="dc_rep">'+
+      '<option value="monthly">متكرر — على كل '+(ses?"حصة":"اشتراك شهري")+' في الفترة</option>'+
+      '<option value="once">لمرة واحدة — على مستحق واحد</option></select></label>'+
+    (gs.length>1 ? '<label class="f"><span>المجموعة</span><select id="dc_gid">'+
+      '<option value="">كل مجموعاته</option>'+gs.map(function(g){
+        return '<option value="'+g.id+'">'+esc(g.name)+'</option>'; }).join("")+'</select></label>' : '')+
+    /* متكرر */
+    '<div id="dc_box_rep">'+
+      '<div class="grid2">'+
+      '<label class="f"><span>تاريخ بداية الخصم</span><input type="date" id="dc_from" value="'+today()+'"></label>'+
+      '<label class="f"><span>تاريخ الانتهاء (اختياري)</span><input type="date" id="dc_to"></label>'+
+      '</div>'+
+      '<div class="note" style="margin-bottom:11px">الخصم بيتطبّق على المستحقات اللي <b>تاريخها من يوم البداية</b> بس — '+
+        'مفيش أثر رجعي لوحده.</div>'+
+      (open.length ? '<div style="margin-bottom:12px"><div class="mut" style="font-size:12.5px;font-weight:600;margin-bottom:5px">'+
+        'تحب تطبّقه كمان على مستحقات مفتوحة قديمة؟ (باختيارك)</div>'+
+        open.map(function(R){
+          return '<label style="display:flex;gap:9px;align-items:center;padding:8px 11px;border:1px solid var(--line);'+
+            'border-radius:10px;margin-bottom:6px;cursor:pointer;font-size:13px">'+
+            '<input type="checkbox" class="dc_inc" value="'+esc(R.id)+'" style="width:auto">'+
+            '<span style="flex:1">'+esc(R.what)+' <span class="mut">· استحقاق '+fmtD(R.date)+'</span></span>'+
+            '<span class="tag bad">باقي '+money(R.rest)+'</span></label>';
+        }).join("")+'</div>' : '')+
+    '</div>'+
+    /* مرة واحدة */
+    '<div id="dc_box_once" class="hide">'+
+      '<label class="f"><span>المستحق اللي ينطبق عليه الخصم</span><select id="dc_due">'+
+        '<option value="">أول مستحق جاي (من النهاردة)</option>'+
+        open.map(function(R){
+          return '<option value="'+esc(R.id)+'">'+esc(R.what)+' — باقي '+esc(money(R.rest))+'</option>';
+        }).join("")+'</select></label>'+
+    '</div>'+
+    (famLive.length ? '<label style="display:flex;gap:9px;align-items:flex-start;margin-bottom:12px;cursor:pointer">'+
+      '<input type="checkbox" id="dc_stack" style="width:auto;margin-top:4px">'+
+      '<span>يتجمع مع خصم الأسرة <span class="mut" style="font-size:12px">(من غير العلامة دي بيتطبّق الأكبر بس)</span></span></label>' : '')+
+    '<label class="f"><span>ملاحظة داخلية للمدرس (مبتظهرش لولي الأمر)</span>'+
+      '<textarea id="dc_note" style="min-height:60px"></textarea></label>'+
+    '</div>'+
+    '<div class="mf"><button class="btn ghost" data-act="payBack">رجوع</button>'+
+    '<button class="btn" data-act="discSave" data-s="'+sid+'">✓ حفظ الخصم</button></div>';
+  openModal(h);
+  UI.pay = { sid:sid, from:from||"" };
+}
+
+/* ============================================================
+   خصم الأسرة — ٣ طرق
+     each   مبلغ ثابت لكل ابن في الشهر
+     pct    نسبة مئوية لكل ابن
+     total  مبلغ ثابت للأسرة كلها بيتوزّع على الأبناء (مش بيتكرر)
+   ============================================================ */
+function modalFamDisc(fid){
+  var f = famById(fid);
+  if(!f) return;
+  var kids = famStudents(fid).filter(function(s){ return !isExempt(s); });
+  if(!kids.length){ toast("مفيش أبناء خاضعين للدفع في الأسرة"); return; }
+  var cur = famDiscs(fid).filter(discLive);
+  var sh = famSplit(100, kids.map(function(s){ return s.id; }));
+  var h = mh("خصم الأسرة — "+f.name)+'<div class="mb" id="fd_root" data-f="'+fid+'">'+
+    '<div class="note" style="margin-bottom:11px"><b>'+ar(kids.length)+' من الأبناء:</b><br>'+
+      kids.map(function(s){
+        return '• '+esc(s.name)+' — '+esc(studentGroups(s).map(function(g){ return money(g.fee); }).join(" + ")||"مش في مجموعة");
+      }).join("<br>")+'</div>'+
+    (cur.length? '<div class="note warn" style="margin-bottom:11px">الخصم الحالي ('+
+      esc(cur.map(function(dc){ return discValueTxt(dc); }).join(" · "))+
+      ') <b>هيتقفل</b> من يوم بداية الخصم الجديد — والمستحقات القديمة تفضل بحسابها زي ما هي.</div>' : '')+
+    '<label class="f"><span>طريقة الخصم</span><select id="fd_type">'+
+      '<option value="each">مبلغ ثابت لكل ابن (في الشهر)</option>'+
+      '<option value="pct">نسبة مئوية لكل ابن</option>'+
+      '<option value="total">مبلغ ثابت للأسرة كلها — بيتوزّع على الأبناء</option></select></label>'+
+    '<label class="f"><span id="fd_vl">قيمة الخصم لكل ابن (جنيه)</span>'+
+      '<input type="number" id="fd_val" inputmode="decimal" min="0" step="any" placeholder="مثال: 50"></label>'+
+    '<div id="fd_shbox" class="hide" style="margin-bottom:12px">'+
+      '<div class="mut" style="font-size:12.5px;font-weight:600;margin-bottom:5px">'+
+        'توزيع المبلغ على الأبناء — تقدر تعدّله (المجموع لازم يساوي المبلغ)</div>'+
+      kids.map(function(s){
+        return '<label style="display:flex;gap:9px;align-items:center;margin-bottom:6px">'+
+          '<span style="flex:1">'+esc(s.name)+'</span>'+
+          '<input type="number" class="fd_sh" data-s="'+s.id+'" inputmode="decimal" min="0" step="any" '+
+            'style="width:110px;text-align:center" value=""></label>';
+      }).join("")+
+      '<div class="mut" id="fd_shsum" style="font-size:12px"></div></div>'+
+    '<label class="f"><span>سبب الخصم</span><input type="text" id="fd_reason" value="خصم إخوة"></label>'+
+    '<div class="grid2">'+
+      '<label class="f"><span>تاريخ بداية الخصم</span><input type="date" id="fd_from" value="'+today()+'"></label>'+
+      '<label class="f"><span>تاريخ الانتهاء (اختياري)</span><input type="date" id="fd_to"></label>'+
+    '</div>'+
+    '<label style="display:flex;gap:9px;align-items:flex-start;margin-bottom:10px;cursor:pointer">'+
+      '<input type="checkbox" id="fd_cur" style="width:auto;margin-top:4px">'+
+      '<span>طبّقه كمان على المستحقات <b>المفتوحة حاليًا</b> للأبناء '+
+        '<span class="mut" style="font-size:12px">(أثر رجعي باختيارك — من غيرها بيبدأ من المستحق الجاي)</span></span></label>'+
+    '<div class="note">لو ابن عنده خصم فردي كمان: <b>بيتطبّق الأكبر بس</b> على كل مستحق — مفيش خصم بيتكرر بالغلط.</div>'+
+    '</div>'+
+    '<div class="mf"><button class="btn ghost" data-act="close">إلغاء</button>'+
+    '<button class="btn" data-act="famDiscSave" data-f="'+fid+'">✓ حفظ خصم الأسرة</button></div>';
+  openModal(h);
+  UI.fdTouched = false;
+}
+/* تحديث نافذة خصم الأسرة مع الكتابة */
+function famDiscSync(fromShare){
+  var root = document.getElementById("fd_root");
+  if(!root) return;
+  var type = val("fd_type");
+  var lab = document.getElementById("fd_vl");
+  if(lab) lab.textContent = type==="pct" ? "نسبة الخصم لكل ابن (٪)"
+                         : (type==="total" ? "إجمالي خصم الأسرة في الشهر (جنيه)" : "قيمة الخصم لكل ابن (جنيه)");
+  var box = document.getElementById("fd_shbox");
+  if(box) box.classList.toggle("hide", type!=="total");
+  if(type!=="total") return;
+  var ins = [].slice.call(document.querySelectorAll(".fd_sh"));
+  var total = num(val("fd_val"), 0);
+  if(!fromShare && !UI.fdTouched){
+    var sh = famSplit(total, ins.map(function(i){ return i.dataset.s; }));
+    ins.forEach(function(i){ i.value = total>0 ? sh[i.dataset.s] : ""; });
+  }
+  var sum = ins.reduce(function(a,i){ return a+num(i.value,0); }, 0);
+  var el = document.getElementById("fd_shsum");
+  if(el){
+    var ok = Math.abs(sum-total) < 0.01;
+    el.innerHTML = 'مجموع التوزيع: <b style="color:var(--'+(ok?"ok":"bad")+')">'+money(sum)+'</b> من '+money(total)+
+      (ok? ' ✓' : ' — لازم يتساووا');
+  }
+}
+
+/* ============================================================
+   الأزرار
+   ============================================================ */
+(function(){
+  var A = {
+    /* --- شاشة التحصيل --- */
+    openCollect: function(){ UI.tab = "collect"; UI.sub = null; UI.q = ""; UI.cDate = ""; render(); },
+    cF: function(el){ UI.cF = el.dataset.f || ""; keepScroll(render); },
+    printCollect: function(el){ printCollect(el.dataset.d || UI.cDate || today()); },
+
+    /* --- الدفع --- */
+    payFull: function(el){
+      var box = document.querySelector("#modal .mb"); UI.sesY = box ? box.scrollTop : UI.sesY;
+      var s = studentById(el.dataset.s);
+      openPay(s, { gid:el.dataset.o ? el.dataset.g : "", d:el.dataset.d, from:payFromOf(el) });
+    },
+    payPart: function(el){
+      var box = document.querySelector("#modal .mb"); UI.sesY = box ? box.scrollTop : UI.sesY;
+      var s = studentById(el.dataset.s);
+      openPay(s, { gid:el.dataset.o ? el.dataset.g : "", d:el.dataset.d, part:true, from:payFromOf(el) });
+    },
+    payNow: function(el){ A.payFull(el); },
+    payOld: function(el){ A.payFull(el); },
+    payOne: function(el){
+      var s = studentById(el.dataset.s);
+      openPay(s, { id:el.dataset.i, part:!!el.dataset.part, from:payFromOf(el) });
+    },
+    /* الأزرار القديمة — كلها بقت تفتح نافذة الدفع بدل ما تسجّل أو تلغي بضغطة */
+    payDue: function(el){ A.payOne(el); },
+    paySes: function(el){
+      var x = (DB.sesDue||[]).filter(function(y){ return y.id===el.dataset.i; })[0];
+      if(x) openPay(studentById(x.sid), { id:x.id, from:payFromOf(el) });
+    },
+    paySesAll: function(el){
+      openPay(studentById(el.dataset.s), { gid:el.dataset.g, from:payFromOf(el) });
+    },
+    gPay: function(el){ openPay(studentById(el.dataset.s), { gid:el.dataset.g, from:payFromOf(el) }); },
+    togglePay: function(el){
+      var s = studentById(el.dataset.s), g = groupById(el.dataset.g);
+      if(!s || !g) return;
+      var rows = finRows(s.id, "9999-12-31", true).filter(function(R){
+        return R.gid===g.id && num(R.mi)===num(el.dataset.m); });
+      if(!rows.length){ toast("الشهر ده مش مستحق على الطالب"); return; }
+      openPay(s, { id:rows[0].id, from:payFromOf(el) });
+    },
+    pySet: function(el){
+      var i = document.getElementById("py_a");
+      if(i){ i.value = el.dataset.v; payPreview(); }
+    },
+    payBack: function(){
+      var P = UI.pay || {};
+      payReturn(P.from, P.sid);
+    },
+    savePay: function(){
+      var P = UI.pay;
+      var s = P ? studentById(P.sid) : null;
+      if(!s) return;
+      var amt = num(val("py_a"), 0);
+      if(amt <= 0){ toast("اكتب المبلغ المدفوع"); return; }
+      var R = payApply(s.id, amt, { date:today(), upto:P.upto,
+        only:P.rows.map(function(x){ return x.id; }),
+        order:val("py_o") || "old", note:val("py_n").trim() });
+      if(!R.done){ toast("مفيش متبقي يتسدّد"); return; }
+      saveSync({ type:"pay", data:{ sid:s.id, date:today() } });
+      var after = Math.max(0, P.rest - R.done);
+      payReturn(P.from, s.id);
+      render();
+      toast("اتسجّل "+money(R.done)+(after>0 ? " — دفعة جزئية، المتبقي "+money(after) : " — اتسدّد بالكامل")+
+        (R.left>0 ? " · "+money(R.left)+" زيادة متسجّلتش" : ""));
+    },
+    /* --- لم يسدد --- */
+    noPay: function(el){
+      var s = studentById(el.dataset.s);
+      if(!s) return;
+      if(isExempt(s)){ toast("الطالب معفي من الدفع"); return; }
+      modalNoPay(s, el.dataset.g, payFromOf(el));
+    },
+    saveNoPay: function(el){
+      var s = studentById(el.dataset.s);
+      if(!s) return;
+      var P = payStatus(s.id) || { total:0 };
+      var n = { id:uid("np"), sid:s.id, gid:el.dataset.g||"", date:today(),
+                reason:val("np_r").trim(), promise:val("np_d")||"", rest:P.total,
+                at:Date.now(), by:DB.meta.name||"المدرّس" };
+      DB.payNotes = DB.payNotes || [];
+      DB.payNotes.push(n);
+      var rem = document.getElementById("np_rem");
+      if(n.promise && rem && rem.checked){
+        DB.reminders.push({ id:uid("r"), title:"متابعة سداد "+s.name+" — "+money(P.total),
+          date:n.promise, note:n.reason, done:false, at:Date.now() });
+      }
+      saveSync();
+      payReturn((UI.pay||{}).from, s.id);
+      render();
+      toast("اتسجّل «لم يسدد»"+(n.promise? " — متابعة يوم "+fmtD(n.promise) : ""));
+    },
+    /* --- السجل وعكس المعاملات --- */
+    ledger: function(el){ modalLedger(el.dataset.s); },
+    printLedger: function(el){ printLedger(el.dataset.s); },
+    voidAsk: function(el){
+      var p = payById(el.dataset.p);
+      if(!p){ toast("الدفعة مش موجودة"); return; }
+      modalVoid(p, payFromOf(el));
+    },
+    voidGo: function(el){
+      var p = payById(el.dataset.p);
+      if(!p) return;
+      var r = val("vd_r"), t = val("vd_t").trim();
+      if(!r && !t){ toast("اكتب سبب الإلغاء"); return; }
+      payVoid(p, r ? (t ? r+" — "+t : r) : t);
+      saveSync();
+      payReturn((UI.pay||{}).from, p.sid);
+      render();
+      toast("اتلغت الدفعة "+money(p.amount)+" — محفوظة في المعاملات الملغاة");
+    },
+    /* --- الخصم الفردي --- */
+    discNew: function(el){ modalDisc(el.dataset.s, payFromOf(el)); },
+    discSave: function(el){
+      var s = studentById(el.dataset.s);
+      if(!s) return;
+      var type = val("dc_type")==="pct" ? "pct" : "fixed";
+      var v = num(val("dc_val"), 0);
+      if(v <= 0){ toast("اكتب قيمة الخصم"); return; }
+      if(type==="pct" && v > 100){ toast("النسبة مينفعش تزيد عن ١٠٠٪"); return; }
+      var reason = val("dc_reason") || val("dc_reason2").trim();
+      if(val("dc_reason")==="" && !reason){ toast("اكتب سبب الخصم"); return; }
+      var rep = val("dc_rep")==="once" ? "once" : "monthly";
+      var from = val("dc_from") || today(), to = val("dc_to") || "";
+      if(rep==="monthly" && to && to < from){ toast("تاريخ الانتهاء قبل البداية"); return; }
+      var incl = [];
+      if(rep==="monthly")
+        document.querySelectorAll(".dc_inc").forEach(function(b){ if(b.checked) incl.push(b.value); });
+      var st = document.getElementById("dc_stack");
+      var dc = { id:uid("dc"), scope:"stu", sid:s.id, type:type, value:v, per:"due",
+                 repeat:rep, dueId: rep==="once" ? val("dc_due") : "",
+                 from: rep==="once" ? today() : from, to: rep==="once" ? "" : to,
+                 incl:incl, gid:val("dc_gid")||"", stack:!!(st && st.checked),
+                 reason:reason, note:val("dc_note").trim(),
+                 at:Date.now(), by:DB.meta.name||"المدرّس" };
+      DB.discounts = DB.discounts || [];
+      DB.discounts.push(dc);
+      saveSync();
+      payReturn((UI.pay||{}).from, s.id);
+      render();
+      var F = finSummary(s.id);
+      toast("اتضاف الخصم"+(F.disc? " — المتبقي على الطالب دلوقتي "+money(F.rest) : " — هيتطبّق على المستحق الجاي"));
+    },
+    discStop: function(el){
+      var dc = discById(el.dataset.i);
+      if(!dc) return;
+      if(!confirm("إيقاف «"+discName(dc)+"» من النهاردة؟\n\n"+
+        "المستحقات اللي اتخصم منها قبل كده هتفضل بحسابها زي ما هي، والمستحقات الجاية هتبقى بالسعر الكامل.")) return;
+      var y = new Date(); y.setDate(y.getDate()-1);
+      dc.to = iso(y);
+      dc.stoppedAt = Date.now();
+      saveSync();
+      var sid = dc.sid || (UI.pay||{}).sid;
+      if(document.getElementById("lg_root") && sid) modalLedger(sid);
+      render(); toast("اتوقف الخصم");
+    },
+    discDel: function(el){
+      var dc = discById(el.dataset.i);
+      if(!dc) return;
+      var why = prompt("حذف «"+discName(dc)+"» كأنه ماكانش؟\n\n"+
+        "كل المستحقات اللي اتخصم منها هترجع لقيمتها الأصلية والرصيد هيتعاد حسابه — الدفعات المسجّلة مش هتتلمس.\n\n"+
+        "اكتب سبب الحذف:", "اتسجّل بالخطأ");
+      if(why===null) return;
+      dc.off = { at:Date.now(), reason:String(why).trim() };
+      saveSync();
+      var sid = dc.sid || (UI.pay||{}).sid;
+      if(document.getElementById("lg_root") && sid) modalLedger(sid);
+      render(); toast("اتحذف الخصم واتعاد حساب الرصيد");
+    },
+    /* --- خصم الأسرة --- */
+    famDisc: function(el){ modalFamDisc(el.dataset.f); },
+    famDiscSave: function(el){
+      var f = famById(el.dataset.f);
+      if(!f) return;
+      var kids = famStudents(f.id).filter(function(s){ return !isExempt(s); });
+      var type = val("fd_type"), v = num(val("fd_val"), 0);
+      if(v <= 0){ toast("اكتب قيمة الخصم"); return; }
+      if(type==="pct" && v > 100){ toast("النسبة مينفعش تزيد عن ١٠٠٪"); return; }
+      var from = val("fd_from") || today(), to = val("fd_to") || "";
+      if(to && to < from){ toast("تاريخ الانتهاء قبل البداية"); return; }
+      var dc = { id:uid("dc"), scope:"fam", famId:f.id,
+                 type: type==="pct" ? "pct" : (type==="total" ? "total" : "fixed"),
+                 value:v, per:"month", repeat:"monthly", dueId:"", from:from, to:to,
+                 incl:[], gid:"", stack:false, reason:val("fd_reason").trim() || "خصم إخوة",
+                 note:"", at:Date.now(), by:DB.meta.name||"المدرّس" };
+      if(dc.type==="total"){
+        var sh = {}, sum = 0;
+        document.querySelectorAll(".fd_sh").forEach(function(i){
+          var a = Math.max(0, num(i.value, 0)); sh[i.dataset.s] = a; sum += a; });
+        if(Math.abs(sum - v) > 0.01){ toast("مجموع التوزيع ("+money(sum)+") لازم يساوي "+money(v)); return; }
+        dc.shares = sh;
+      }
+      var cb = document.getElementById("fd_cur");
+      if(cb && cb.checked){
+        kids.forEach(function(s){
+          duesOf(s.id, today()).forEach(function(R){
+            if(R.rest>0 && R.date < from) dc.incl.push(s.id+":"+R.id); });
+        });
+      }
+      /* الخصم القديم بيتقفل عند بداية الجديد — من غير ما يتمسح */
+      var y = new Date(from+"T00:00:00"); y.setDate(y.getDate()-1);
+      var end = iso(y);
+      famDiscs(f.id).forEach(function(old){
+        if(!discLive(old) && !(old.to && old.to >= from)) return;
+        if((old.from||"") > end){ old.off = { at:Date.now(), reason:"اتبدّل بخصم جديد قبل ما يبدأ" }; }
+        else{ old.to = end; old.stoppedAt = Date.now(); }
+      });
+      DB.discounts = DB.discounts || [];
+      DB.discounts.push(dc);
+      saveSync(); closeModal(); render();
+      toast("اتحفظ خصم الأسرة");
+    },
+    famDiscStop: function(el){
+      var dc = discById(el.dataset.i);
+      if(!dc) return;
+      if(!confirm("إيقاف خصم الأسرة من النهاردة؟\n\nالمستحقات القديمة تفضل بحسابها، والجاية بالسعر الكامل.")) return;
+      var y = new Date(); y.setDate(y.getDate()-1);
+      if((dc.from||"") > iso(y)) dc.off = { at:Date.now(), reason:"اتوقف قبل ما يبدأ" };
+      else{ dc.to = iso(y); dc.stoppedAt = Date.now(); }
+      saveSync(); render(); toast("اتوقف خصم الأسرة");
+    },
+    /* --- واتساب --- */
+    waDue: function(el){
+      var s = studentById(el.dataset.s);
+      if(!s) return;
+      /* الحارس الوحيد لكل التذكيرات المالية */
+      if(isExempt(s)){ toast("الطالب معفي من الدفع — مفيش تذكير مالي"); return; }
+      var txt = waDueText(s, el.dataset.o ? el.dataset.g : "") || waDueText(s, "");
+      if(!txt){ toast("الطالب سديد"); return; }
+      modalMsgEdit(s, txt, "رسالة المستحق لولي الأمر");
+    },
+    meSend: function(el){
+      var s = studentById(el.dataset.s);
+      var t = val("me_t");
+      var r = document.querySelector('input[name="me_ph"]:checked');
+      var ph = r ? r.value : (val("me_num") || (s ? contactOf(s) : ""));
+      if(!waNum(ph)){ toast("اكتب رقم الواتساب"); return; }
+      closeModal();
+      waOpen(ph, t);
+    },
+    waFam: function(el){
+      var f = famById(el.dataset.f);
+      if(!f) return;
+      var ph = [], seen = {};
+      function add(l, n){ var w = waNum(n); if(w && !seen[w]){ seen[w]=1; ph.push({ l:l, n:n }); } }
+      add("رقم الأسرة"+(f.guard? " ("+f.guard+")" : ""), f.phone);
+      famStudents(f.id).forEach(function(s){ add("ولي أمر "+s.name, s.guardPhone); });
+      modalWa({ title:"كشف حساب الأسرة", name:f.name, sub:f.guard||"", phones:ph, text:waFamText(f), sid:"" });
+    }
+  };
+  Object.keys(A).forEach(function(k){ ACTS[k] = A[k]; });
+})();
+
+/* تحديثات مع الكتابة والاختيار — للنوافذ الجديدة بس */
+document.addEventListener("input", function(e){
+  var el = e.target;
+  if(!el || !el.id && !el.className) return;
+  if(el.id==="py_a") payPreview();
+  if(el.id==="fd_val") famDiscSync(false);
+  if(el.classList && el.classList.contains("fd_sh")){ UI.fdTouched = true; famDiscSync(true); }
+});
+document.addEventListener("change", function(e){
+  var el = e.target;
+  if(!el) return;
+  if(el.dataset && el.dataset.act==="cDate"){ UI.cDate = el.value || ""; render(); }
+  if(el.id==="py_o") payPreview();
+  if(el.id==="fd_type"){ UI.fdTouched = false; famDiscSync(false); }
+  if(el.id==="dc_rep"){
+    var once = el.value==="once";
+    var a = document.getElementById("dc_box_rep"), b = document.getElementById("dc_box_once");
+    if(a) a.classList.toggle("hide", once);
+    if(b) b.classList.toggle("hide", !once);
+  }
+});
 
 /* ---------- الربط ---------- */
 document.addEventListener("click", function(e){
