@@ -71,6 +71,13 @@
     "results": {
       ".read": "auth != null",
       ".write": "auth != null && auth.uid === root.child('config/teacherUid').val()"
+    },
+    "reports": {
+      "$id": {
+        ".read": true,
+        ".write": "auth != null && auth.uid === root.child('config/teacherUid').val()",
+        ".validate": "!newData.exists() || (newData.hasChildren(['html','at','exp']) && newData.child('html').isString() && newData.child('html').val().length < 900000)"
+      }
     }
   }
 }

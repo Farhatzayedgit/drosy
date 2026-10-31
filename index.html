@@ -470,7 +470,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "7.7";
+var APP_VER = "7.8";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -12310,7 +12310,6 @@ function reportMsg(s, kind){
     : ({ att:"عن الحضور والغياب", tasks:"عن الواجبات", exams:"عن الامتحانات والدرجات", money:"عن الموقف المالي" })[kind];
   return "السلام عليكم.\n"+
     "نرسل لحضرتك "+(kind==="all"? "تقرير متابعة" : REPORT_KINDS[kind].t)+" الطالب "+s.name+"، "+what+".\n"+
-    "التقرير مرفق كملف PDF.\n"+
     "مع تحيات "+(DB.meta.name || "المدرّس")+(DB.meta.subject? " — مدرس "+DB.meta.subject : "");
 }
 
@@ -12329,18 +12328,28 @@ function sendReportPdf(sid, kind, from, to){
   if(!from || !to){ var RG = reportRange(sid); from = from || RG.from; to = to || RG.to; }
   if(!parentWa(s)){ modalNeedParent(sid, kind, from, to); return; }
   openModal(mh(REPORT_KINDS[kind].t+" — "+s.name)+'<div class="mb">'+
-    '<div class="empty"><div class="big">⏳</div><b>بنجهّز ملف PDF…</b>'+
+    '<div class="empty"><div class="big">⏳</div><b>بنجهّز التقرير…</b>'+
     '<p>ثواني ويبقى جاهز.</p></div></div>');
-  loadPdfLibs().then(function(ok){
+  /* لو فيه تعديلات لسه ما اترفعتش والنت شغال، نرفعها الأول —
+     عشان التقرير يطلع من أحدث نسخة */
+  var pre = Promise.resolve();
+  try{
+    if(fbOn() && FB.role==="teacher" && FB.db && (SYNCM.dirty || queueCount()))
+      pre = syncUp().then(function(ok){ if(ok===true) queueClear(); }).catch(function(){});
+  }catch(e){}
+  var html = "";
+  pre.then(function(){ return loadPdfLibs(); }).then(function(ok){
     if(!ok){ modalPdfFail(sid, kind, from, to); return; }
     var opts = REPORT_KINDS[kind].o;
-    return htmlToPdf(stuReportHTML(sid, from, to, opts)).then(function(r){
+    html = stuReportHTML(sid, from, to, opts);
+    return htmlToPdf(html).then(function(r){
       var fname = (REPORT_KINDS[kind].t+" - "+s.name+" - "+today()).replace(/[\\/:*?"<>|]/g,"")+".pdf";
       var file = null;
       try{ file = new File([r.blob], fname, { type:"application/pdf" }); }catch(e){}
       if(UI.pdf && UI.pdf.url) try{ URL.revokeObjectURL(UI.pdf.url); }catch(e){}
       UI.pdf = { sid:sid, kind:kind, from:from, to:to, blob:r.blob, file:file, name:fname,
-                 url:URL.createObjectURL(r.blob), pages:r.pages, text:reportMsg(s, kind) };
+                 url:URL.createObjectURL(r.blob), pages:r.pages, text:reportMsg(s, kind),
+                 html:html, link:"", linkSt:"" };
       modalPdfReady();
     });
   }).catch(function(e){
@@ -12352,10 +12361,84 @@ function canShareFile(f){
   try{ return !!(f && navigator.canShare && navigator.share && navigator.canShare({ files:[f] })); }
   catch(e){ return false; }
 }
+/* ============================================================
+   رابط التقرير — عشان محادثة ولي الأمر تتفتح على طول
+   الواتساب مبيسمحش لأي موقع يفتح محادثة رقم معيّن ومعاها ملف
+   مرفق؛ المشاركة بالملف بتخليك تدوّر على المحادثة بإيدك.
+   فبنرفع نسخة من التقرير على السحابة بتاعتك برابط سري طويل
+   (محدش يقدر يخمّنه)، ونفتح محادثة ولي الأمر برقمه والرسالة
+   فيها الرابط. ولي الأمر يفتحه ويشوف التقرير وينزّله PDF.
+   الرابط بيشتغل ٣٠ يوم وبعدين بيتمسح.
+   ============================================================ */
+var REPORT_DAYS = 30;
+function reportToken(){
+  var a = new Uint8Array(18);
+  (window.crypto || window.msCrypto).getRandomValues(a);
+  var c = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789", o = "";
+  for(var i=0;i<a.length;i++) o += c[a[i] % c.length];
+  return o;
+}
+function canLinkReport(){
+  return !!(fbOn() && FB.role==="teacher" && FB.auth && FB.auth.currentUser && !FB.auth.currentUser.isAnonymous);
+}
+function reportLinkOf(id){
+  return location.origin + location.pathname + "?r=" + id;
+}
+/* بيرفع التقرير مرة واحدة ويرجّع الرابط */
+function ensureReportLink(P){
+  if(P.link) return Promise.resolve(P.link);
+  if(P._linkP) return P._linkP;
+  if(!canLinkReport()) return Promise.reject(new Error("nolink"));
+  var s = studentById(P.sid);
+  var id = reportToken(), now = Date.now(), exp = now + REPORT_DAYS*864e5;
+  P._linkP = fbSet("reports/"+id, {
+    html: P.html, at: now, exp: exp,
+    t: REPORT_KINDS[P.kind].t, n: s ? s.name : "",
+    tn: DB.meta.name || "", from: P.from, to: P.to
+  }).then(function(){
+    P.link = reportLinkOf(id);
+    /* فهرس خاص بالمدرّس عشان نمسح الروابط القديمة */
+    fbSet("private/rep/"+id, { exp:exp, sid:P.sid, k:P.kind, at:now }).catch(function(){});
+    cleanOldReports();
+    return P.link;
+  });
+  P._linkP.catch(function(){ P._linkP = null; });
+  return P._linkP;
+}
+function cleanOldReports(){
+  fbGet("private/rep").then(function(v){
+    var now = Date.now();
+    Object.keys(v||{}).forEach(function(id){
+      if(num((v[id]||{}).exp) > now) return;
+      try{ FB.db.ref("reports/"+id).remove(); FB.db.ref("private/rep/"+id).remove(); }catch(e){}
+    });
+  }).catch(function(){});
+}
+function linkMsg(text, link){
+  return String(text||"").replace(/\s+$/,"") +
+    "\n\nتقدر تشوف التقرير وتنزّله PDF من الرابط ده:\n" + link;
+}
+/* تحديث زرار الإرسال المباشر من غير ما نرسم النافذة كلها */
+function paintLinkBtn(){
+  var P = UI.pdf, b = document.getElementById("pdf_go"), n = document.getElementById("pdf_gonote");
+  if(!P || !b) return;
+  if(P.linkSt==="ok"){
+    b.disabled = false; b.innerHTML = "✆ ابعت لولي الأمر على واتساب";
+    if(n) n.innerHTML = 'هيفتح <b>محادثة ولي الأمر على طول</b> والرسالة جاهزة ومعاها رابط التقرير — '+
+      'تدوس إرسال بس. ولي الأمر يفتح الرابط ويقدر ينزّل التقرير PDF. الرابط شغال '+ar(REPORT_DAYS)+' يوم.';
+  }else if(P.linkSt==="wait"){
+    b.disabled = true; b.innerHTML = "⏳ بنجهّز رابط التقرير…";
+  }else{
+    b.disabled = false; b.innerHTML = "↻ حاول تجهّز الرابط تاني";
+    if(n) n.innerHTML = '<span style="color:var(--bad)">مقدرناش نرفع التقرير دلوقتي</span> — اتأكد من النت. '+
+      'أو ابعت الملف نفسه من الزرار اللي تحت.';
+  }
+}
 function modalPdfReady(){
   var P = UI.pdf; if(!P) return;
   var s = studentById(P.sid); if(!s) return;
   var share = canShareFile(P.file);
+  var linkable = canLinkReport();
   var stale = !navigator.onLine || queueCount() || (SYNCM && SYNCM.dirty);
   openModal(mh("التقرير جاهز")+'<div class="mb">'+
     '<div class="note ok" style="margin-bottom:11px"><b>'+esc(REPORT_KINDS[P.kind].t)+' — '+esc(s.name)+'</b><br>'+
@@ -12364,25 +12447,38 @@ function modalPdfReady(){
     '<div class="note" style="margin-bottom:11px">ولي الأمر'+(s.guard? ' ('+esc(s.guard)+')' : '')+': '+
       '<b style="direction:ltr;display:inline-block">'+esc(s.guardPhone)+'</b></div>'+
     (stale? '<div class="note warn" style="margin-bottom:11px">التقرير اتعمل من البيانات اللي على الجهاز — '+
-      'فيه تعديلات لسه ما اتزامنتش. لو عايز أحدث نسخة، اعمله تاني بعد المزامنة.</div>' : '')+
-    (share
-      ? '<button class="btn wa block" data-act="pdfShare" style="margin-bottom:8px;padding:15px">✆ شارك الملف على واتساب</button>'+
-        '<div class="mut" style="font-size:12px;margin-bottom:12px;line-height:1.7">هتفتح قايمة المشاركة: اختار <b>واتساب</b>، '+
-        'وبعدين اختار محادثة ولي الأمر (<span style="direction:ltr;display:inline-block">'+esc(s.guardPhone)+'</span>) واضغط إرسال. '+
-        'نص الرسالة هيتبعت مع الملف.</div>'
-      : '<div class="note warn" style="margin-bottom:11px">الجهاز ده مبيدعمش مشاركة الملفات مباشرة من المتصفح. '+
-        '<b>الطريقة:</b> نزّل الملف (١)، وبعدين افتح محادثة ولي الأمر (٢) — الرسالة هتبقى مكتوبة، '+
-        'دوس على علامة المرفقات 📎 واختار الملف اللي نزل.</div>')+
+      'فيه تعديلات لسه ما اتزامنتش.</div>' : '')+
+    /* ١) الإرسال المباشر برابط */
+    (linkable
+      ? '<button class="btn wa block" id="pdf_go" data-act="pdfGo" style="margin-bottom:8px;padding:15px" disabled>'+
+          '⏳ بنجهّز رابط التقرير…</button>'+
+        '<div class="mut" id="pdf_gonote" style="font-size:12px;margin-bottom:14px;line-height:1.7"></div>'
+      : '<div class="note warn" style="margin-bottom:11px">'+
+          (navigator.onLine
+            ? 'الإرسال المباشر لمحادثة ولي الأمر محتاج تكون داخل بحساب السحابة (☁). '
+            : 'مفيش إنترنت — الإرسال المباشر برابط محتاج نت. ')+
+          'تقدر دلوقتي تبعت الملف نفسه.</div>')+
+    /* ٢) الملف نفسه */
+    '<div style="font-size:12.5px;color:var(--mut);font-weight:600;margin-bottom:6px">'+
+      (linkable ? 'أو ابعت الملف نفسه' : 'ابعت الملف')+'</div>'+
     '<div class="row">'+
-      '<button class="btn '+(share?"ghost":"")+' sm" data-act="pdfDown" style="flex:1">'+(share?"":"١) ")+'↓ تحميل PDF</button>'+
-      '<button class="btn '+(share?"ghost":"wa")+' sm" data-act="pdfWa" style="flex:1">'+(share?"":"٢) ")+'✆ افتح محادثة ولي الأمر</button>'+
+      (share ? '<button class="btn '+(linkable?"ghost":"wa")+' sm" data-act="pdfShare" style="flex:1">📎 شارك ملف PDF</button>' : '')+
+      '<button class="btn ghost sm" data-act="pdfDown" style="flex:1">↓ تحميل PDF</button>'+
       '<button class="btn ghost sm" data-act="pdfView" style="flex:1">👁 معاينة</button>'+
     '</div>'+
+    '<div class="mut" style="font-size:11.5px;margin-top:6px;line-height:1.7">'+
+      (share ? 'مشاركة الملف: الواتساب بيخليك تختار المحادثة بنفسك — دي حدود الواتساب مع أي موقع.'
+             : 'نزّل الملف وابعته من الواتساب من علامة المرفقات 📎.')+'</div>'+
     '<label class="f" style="margin-top:12px"><span>نص الرسالة — تقدر تعدّله</span>'+
       '<textarea id="pdf_t" style="min-height:110px;line-height:1.8">'+esc(P.text)+'</textarea></label>'+
-    '<div class="note">الإرسال الفعلي بيتم من واتساب بإيدك — البرنامج مبيبعتش حاجة لوحده، '+
-      'ومش هيقول «اتبعت» إلا لو انت بعته.</div>'+
+    '<div class="note">الإرسال الفعلي بيتم من الواتساب بإيدك — البرنامج مبيبعتش حاجة لوحده.</div>'+
     '</div><div class="mf"><button class="btn ghost" data-act="close">إغلاق</button></div>');
+  if(linkable){
+    P.linkSt = P.link ? "ok" : "wait";
+    paintLinkBtn();
+    ensureReportLink(P).then(function(){ P.linkSt = "ok"; paintLinkBtn(); })
+      .catch(function(){ P.linkSt = "err"; paintLinkBtn(); });
+  }
 }
 function modalPdfFail(sid, kind, from, to, why){
   var s = studentById(sid);
@@ -12456,11 +12552,21 @@ function modalNeedParent(sid, kind, from, to){
       toast("اتنزّل الملف — هتلاقيه في التنزيلات");
     },
     pdfView: function(){ var P = UI.pdf; if(P) window.open(P.url, "_blank"); },
-    pdfWa: function(){
+    /* فتح محادثة ولي الأمر على طول برسالة فيها رابط التقرير.
+       لازم يحصل جوه الضغطة نفسها (الرابط متجهّز قبلها) عشان
+       الموبايل مايمنعش فتح الواتساب. */
+    pdfGo: function(){
       var P = UI.pdf; if(!P) return;
       var s = studentById(P.sid); if(!s) return;
-      var tx = (val("pdf_t") || P.text) + "\n(الملف مرفق)";
+      if(!P.link){
+        P.linkSt = "wait"; paintLinkBtn();
+        ensureReportLink(P).then(function(){ P.linkSt = "ok"; paintLinkBtn(); })
+          .catch(function(){ P.linkSt = "err"; paintLinkBtn(); });
+        return;
+      }
+      var tx = linkMsg(val("pdf_t") || P.text, P.link);
       window.open("https://wa.me/"+parentWa(s)+"?text="+encodeURIComponent(tx), "_blank");
+      toast("اتفتحت محادثة ولي الأمر — دوس إرسال في الواتساب");
     },
     pdfWaOnly: function(el){
       var s = studentById(el.dataset.s); if(!s) return;
@@ -12758,11 +12864,86 @@ setInterval(function(){
   if(num(e.mins,0) && left<=60) render();
 }, 1000);
 
+/* ============================================================
+   صفحة التقرير لولي الأمر  (?r=الرابط)
+   بتعرض التقرير بس — مفيش أي حاجة تانية من البرنامج، ومفيش
+   دخول. ولي الأمر يشوف التقرير وينزّله PDF أو يطبعه.
+   ============================================================ */
+var REPORT_TOKEN = (location.search.match(/[?&]r=([A-Za-z0-9]{12,48})/) || [])[1] || "";
+function showSharedReport(){
+  window.__booted = true;
+  try{ clearTimeout(window.__sosT); }catch(e){}
+  document.title = "تقرير الطالب — دروسي";
+  var css = 'body{margin:0;background:#EEF3F2;font-family:Tajawal,system-ui,sans-serif;color:#014A59}'+
+    '.rb{position:sticky;top:0;z-index:5;background:#014A59;color:#fff;padding:10px 12px;'+
+      'display:flex;gap:8px;align-items:center;flex-wrap:wrap}'+
+    '.rb b{flex:1;min-width:150px;font-family:Cairo,sans-serif;font-size:14.5px}'+
+    '.rb small{display:block;font-weight:400;color:#A9C0BE;font-size:11.5px}'+
+    '.rb button{border:0;border-radius:10px;padding:10px 14px;font:inherit;font-weight:800;cursor:pointer}'+
+    '.rb .p{background:#E8930C;color:#fff}.rb .g{background:rgba(255,255,255,.15);color:#fff}'+
+    '.msg{max-width:420px;margin:60px auto;background:#fff;border-radius:16px;padding:26px;text-align:center;'+
+      'border:1px solid #DCE6E4;line-height:1.8}'+
+    '#rw{overflow:hidden;margin:12px auto;background:#fff;box-shadow:0 2px 14px rgba(1,74,89,.12)}'+
+    '#rf{border:0;width:794px;transform-origin:top right;display:block;background:#fff}';
+  document.body.innerHTML = '<style>'+css+'</style><div class="msg">⏳ بنفتح التقرير…</div>';
+  function msg(t){ document.body.innerHTML = '<style>'+css+'</style><div class="msg">'+t+'</div>'; }
+  if(!fbInit()){ msg("مقدرناش نوصل — اتأكد من الإنترنت وافتح الرابط تاني."); return; }
+  fbGet("reports/"+REPORT_TOKEN).then(function(v){
+    if(!v || !v.html){ msg("<b>الرابط ده مش موجود أو اتمسح.</b><br>اطلب من المدرّس يبعت التقرير تاني."); return; }
+    if(num(v.exp) && num(v.exp) < Date.now()){
+      msg("<b>صلاحية الرابط انتهت.</b><br>اطلب من المدرّس يبعت تقرير جديد."); return; }
+    var fname = ((v.t||"تقرير")+" - "+(v.n||"")).replace(/[\\/:*?"<>|]/g,"")+".pdf";
+    document.body.innerHTML = '<style>'+css+'</style>'+
+      '<div class="rb"><b>'+esc(v.t||"تقرير")+' — '+esc(v.n||"")+
+        '<small>'+esc(v.tn||"")+(v.at? ' · '+fmtD(iso(new Date(v.at))) : '')+'</small></b>'+
+        '<button class="p" id="rDown">⬇ تحميل PDF</button>'+
+        '<button class="g" id="rPrint">⎙ طباعة</button></div>'+
+      '<div id="rw"><iframe id="rf" sandbox="allow-same-origin allow-modals" title="التقرير"></iframe></div>';
+    var fr = document.getElementById("rf"), wr = document.getElementById("rw");
+    fr.srcdoc = v.html;
+    function fit(){
+      try{
+        var h = fr.contentDocument.documentElement.scrollHeight;
+        var sc = Math.min(1, (window.innerWidth - 16) / 794);
+        fr.style.height = h+"px";
+        fr.style.transform = "scale("+sc+")";
+        wr.style.width = Math.round(794*sc)+"px";
+        wr.style.height = Math.round(h*sc)+"px";
+      }catch(e){}
+    }
+    fr.onload = function(){ fit(); setTimeout(fit, 800); setTimeout(fit, 2500); };
+    window.addEventListener("resize", fit);
+    document.getElementById("rPrint").onclick = function(){
+      try{ fr.contentWindow.focus(); fr.contentWindow.print(); }catch(e){}
+    };
+    document.getElementById("rDown").onclick = function(){
+      var bt = this; bt.disabled = true; bt.textContent = "⏳ بنجهّز الملف…";
+      loadPdfLibs().then(function(ok){
+        if(!ok) throw new Error("libs");
+        return htmlToPdf(v.html);
+      }).then(function(r){
+        var u = URL.createObjectURL(r.blob), a = document.createElement("a");
+        a.href = u; a.download = fname; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(function(){ URL.revokeObjectURL(u); }, 60000);
+        bt.textContent = "✓ اتنزّل";
+      }).catch(function(){
+        bt.textContent = "⬇ تحميل PDF";
+        alert("مقدرناش نجهّز الملف — استخدم زرار الطباعة واختار «حفظ كـ PDF».");
+      }).then(function(){ setTimeout(function(){ bt.disabled = false; bt.textContent = "⬇ تحميل PDF"; }, 2500); });
+    };
+  }).catch(function(){ msg("مقدرناش نفتح التقرير — اتأكد من الإنترنت وافتح الرابط تاني."); });
+}
+
+if(REPORT_TOKEN){
+  FB.role = "viewer";
+  showSharedReport();
+}else{
 load();
 /* لو القفل شغّال، البرنامج يفتح مقفول */
 if(DB.lock && DB.lock.on && DB.lock.pin) UI.locked = true;
 try{ bakTick(); }catch(e){}
 restoreSession();
+}
 /* من هنا ورايح أي حفظ يبقى تعديل حقيقي من المستخدم */
 setTimeout(function(){ BOOTING = false; }, 0);
 </script>
