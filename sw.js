@@ -5,15 +5,25 @@
    جديد (أو العكس) فالبرنامج يفتح والأزرار ماتستجيبش.
    الكاش للحالة الوحيدة اللي محتاجينه فيها: النت مقطوع تمامًا.
    ============================================================ */
-var VER   = "v44";
+var VER   = "v45";
 var CACHE = "drosy-" + VER;
 var PAGE  = "./index.html";
+/* أدوات عمل الـPDF والـQR — بتتخزّن عشان تشتغل من غير نت */
+var LIBS  = [
+  "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js",
+  "https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js",
+  "https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"
+];
 
 self.addEventListener("install", function(e){
   self.skipWaiting();
   e.waitUntil(
     caches.open(CACHE).then(function(c){
-      return c.add(new Request(PAGE, { cache:"reload" })).catch(function(){});
+      return Promise.all([c.add(new Request(PAGE, { cache:"reload" })).catch(function(){})]
+        .concat(LIBS.map(function(u){
+          return fetch(new Request(u, { mode:"no-cors" })).then(function(r){ return c.put(u, r); })
+            .catch(function(){});
+        })));
     })
   );
 });
@@ -33,6 +43,19 @@ self.addEventListener("message", function(e){
 self.addEventListener("fetch", function(e){
   var req = e.request;
   if(req.method!=="GET") return;
+  /* أدوات الـPDF والـQR: من الكاش لو موجودة (ثابتة بإصدارها)، وإلا من الشبكة */
+  if(LIBS.indexOf(req.url) >= 0){
+    e.respondWith(
+      caches.match(req.url).then(function(m){
+        return m || fetch(req).then(function(r){
+          var cp = r.clone();
+          caches.open(CACHE).then(function(c){ c.put(req.url, cp); }).catch(function(){});
+          return r;
+        });
+      })
+    );
+    return;
+  }
   /* فايربيز وجوجل والواتساب: من الشبكة دايمًا، من غير أي تدخّل */
   if(/firebase|googleapis|gstatic|wa\.me|jsdelivr/.test(req.url)) return;
 
