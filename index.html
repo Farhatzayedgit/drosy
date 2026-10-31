@@ -470,7 +470,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "7.8";
+var APP_VER = "7.8.1";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -1225,12 +1225,7 @@ function flushQueue(loud){
   var n2 = queueCount();
   if(!n2){ if(loud) toast("مفيش حاجة مستنية"); return; }
   if(loud) toast("بنزامن "+ar(n2)+" عملية…");
-  syncUp().then(function(ok){
-    if(ok !== true){
-      UI.qErr = (ok !== "conflict"); render();
-      if(loud && ok!=="conflict") toast("المزامنة فشلت — العمليات محفوظة وهنعيد المحاولة");
-      return;
-    }
+  syncUp().then(function(){
     queueClear();
     UI.qErr = false;
     render();
@@ -1252,18 +1247,14 @@ function autoSync(reason){
   if(_autoSyncBusy) return;
   if(!navigator.onLine) return;
   if(!fbOn() || FB.role!=="teacher") return;
-  /* فيه عمليات في الطابور، أو تعديلات محلية لسه ما اترفعتش
-     (زي تعديل بيانات طالب من غير نت) — الاتنين بيتزامنوا لوحدهم */
-  if(!queueCount() && !SYNCM.dirty) return;
+  if(!queueCount()) return;
   _autoSyncBusy = true;
   var n2 = queueCount();
-  syncUp().then(function(ok){
-    _autoSyncBusy = false;
-    /* الطابور مبيتمسحش غير لو الرفع نجح فعلًا */
-    if(ok !== true){ UI.qErr = (ok !== "conflict"); render(); return; }
+  syncUp().then(function(){
     queueClear(); UI.qErr = false;
+    _autoSyncBusy = false;
     render();
-    if(n2) toast("اتزامن " + ar(n2) + " عملية");
+    toast("اتزامن " + ar(n2) + " عملية");
   }).catch(function(){
     UI.qErr = true;
     _autoSyncBusy = false;
@@ -6899,8 +6890,7 @@ function saveStu(){
     }
   }
   s.note = val("s_note").trim();
-  saveSync({ type:"stu", data:{ sid:s.id, date:today() } });
-  closeModal(); render();
+  saveSync(); closeModal(); render();
   toast(sid? "اتحفظ" : "اتضاف الطالب");
 }
 
@@ -12332,13 +12322,8 @@ function sendReportPdf(sid, kind, from, to){
     '<p>ثواني ويبقى جاهز.</p></div></div>');
   /* لو فيه تعديلات لسه ما اترفعتش والنت شغال، نرفعها الأول —
      عشان التقرير يطلع من أحدث نسخة */
-  var pre = Promise.resolve();
-  try{
-    if(fbOn() && FB.role==="teacher" && FB.db && (SYNCM.dirty || queueCount()))
-      pre = syncUp().then(function(ok){ if(ok===true) queueClear(); }).catch(function(){});
-  }catch(e){}
   var html = "";
-  pre.then(function(){ return loadPdfLibs(); }).then(function(ok){
+  loadPdfLibs().then(function(ok){
     if(!ok){ modalPdfFail(sid, kind, from, to); return; }
     var opts = REPORT_KINDS[kind].o;
     html = stuReportHTML(sid, from, to, opts);
@@ -12529,7 +12514,7 @@ function modalNeedParent(sid, kind, from, to){
       if(!w || w.length < 11){ toast("الرقم مش مظبوط — اكتبه زي 01xxxxxxxxx"); return; }
       s.guardPhone = p;
       var gn = val("np_gn").trim(); if(gn) s.guard = gn;
-      saveSync({ type:"stu", data:{ sid:s.id, date:today() } });
+      saveSync();
       render();
       sendReportPdf(s.id, el.dataset.k, el.dataset.f, el.dataset.t);
     },
