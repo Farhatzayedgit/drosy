@@ -470,7 +470,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "7.8.1";
+var APP_VER = "7.9";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -579,7 +579,7 @@ function scheduleUp(){
   if(!fbOn() || FB.role!=="teacher") return;
   if(!navigator.onLine){ UI.qPending = true; return; }
   clearTimeout(window._sy);
-  window._sy = setTimeout(function(){ try{ syncUp(); }catch(e){} }, 1200);
+  window._sy = setTimeout(function(){ try{ syncUp(); }catch(e){} }, 600);
 }
 
 /* بصمة البيانات — من غير أرقام النسخ، عشان نقارن المحتوى نفسه */
@@ -718,7 +718,7 @@ var SYNCM = { seen:0, dirty:false, conflict:false };
 (function(){
   try{
     var v = JSON.parse(localStorage.getItem(KEY+"_syncm")||"null");
-    if(v && typeof v.seen==="number") SYNCM = { seen:v.seen, dirty:!!v.dirty, conflict:!!v.conflict };
+    if(v && typeof v.seen==="number") SYNCM = { seen:v.seen, dirty:!!v.dirty, conflict:false };
   }catch(e){}
 })();
 function smSave(){
@@ -1187,11 +1187,57 @@ function syncDown(){
   }).catch(function(){ return "err"; });
 }
 
-/* لما يحصل تعارض — بنفتح القرار للمستخدم بدل ما نقرر إحنا */
+/* ============================================================
+   الحفظ أونلاين — من غير أي رسايل تعارض  (v7.9)
+   السحابة هي المرجع. أي تعديل بيترفع على طول، وأي تعديل من
+   جهاز تاني بيوصل لحظيًا (مستمع على رقم النسخة).
+   لو جهازين عدّلوا في نفس اللحظة: **أحدث تعديل هو اللي يكمّل**
+   لوحده من غير ما نسأل — والنسختين بيتحفظوا نسخ احتياطية قبلها
+   (◷ النسخ الاحتياطية) عشان مفيش حاجة تضيع نهائي.
+   ============================================================ */
 function onConflict(){
-  if(UI._confOpen) return;
-  UI._confOpen = true;
-  try{ modalConflict(); }catch(e){ UI._confOpen=false; }
+  var v = CONF.cloud;
+  CONF.cloud = null;
+  SYNCM.conflict = false; smSave();
+  if(UI._autoRes) return;
+  UI._autoRes = true;
+  setTimeout(function(){
+    try{
+      bakSave("نسخة الجهاز (حل تلقائي)");
+      if(v && v.meta) bakSave("نسخة السحابة (حل تلقائي)", v);
+    }catch(e){}
+    var mine = num(DB.at,0), theirs = num(v && v.at,0);
+    var job;
+    if(v && v.meta && theirs > mine){
+      /* السحابة أحدث → ناخدها */
+      SYNCM.dirty = false; smSave();
+      job = syncDown();
+    }else{
+      /* تعديلي أنا الأحدث → يترفع */
+      job = syncUp(true);
+    }
+    job.then(function(){ UI._autoRes = false; SYNCM.conflict = false; smSave(); render(); },
+             function(){ UI._autoRes = false; SYNCM.conflict = false; smSave(); });
+  }, 50);
+}
+/* مزامنة لحظية: أي جهاز يكتب → الباقيين يسحبوا على طول */
+function liveSync(){
+  if(SYNC.busy || UI._autoRes){ clearTimeout(window._pullT); window._pullT = setTimeout(liveSync, 1500); return; }
+  if(SYNCM.dirty){ syncUp(); return; }
+  syncDown().then(function(st){ if(st==="pulled") render(); });
+}
+function liveStart(){
+  if(SYNC._live || !FB.db || FB.role!=="teacher") return;
+  SYNC._live = true;
+  try{
+    FB.db.ref("private/meta").on("value", function(sn){
+      var m = sn.val() || {};
+      if(typeof m.rev!=="number" || m.rev===SYNCM.seen) return;
+      if(m.dev===DEV_ID) return;              /* ده رفعي أنا */
+      clearTimeout(window._pullT);
+      window._pullT = setTimeout(liveSync, 400);
+    });
+  }catch(e){ SYNC._live = false; }
 }
 /* ============================================================
    طابور المزامنة — العمل من غير إنترنت
@@ -1263,11 +1309,18 @@ function autoSync(reason){
 }
 /* عودة النت */
 window.addEventListener("online", function(){
-  setTimeout(function(){ autoSync("online"); }, 1200);
+  setTimeout(function(){
+    autoSync("online");
+    try{ if(fbOn() && FB.role==="teacher"){ if(SYNCM.dirty) syncUp(); else liveSync(); } }catch(e){}
+  }, 1200);
 });
 /* الرجوع للتبويب */
 document.addEventListener("visibilitychange", function(){
-  if(!document.hidden) setTimeout(function(){ autoSync("visible"); }, 600);
+  if(!document.hidden) setTimeout(function(){
+    autoSync("visible");
+    /* رجعت للبرنامج → هات أي تعديل اتعمل من جهاز تاني */
+    try{ if(fbOn() && FB.role==="teacher") liveSync(); }catch(e){}
+  }, 600);
 });
 /* كل دقيقتين */
 setInterval(function(){ autoSync("tick"); }, 120000);
@@ -9558,7 +9611,7 @@ var ACTS = {
     a.click();
     setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
   },
-  conf: function(){ modalConflict(); },
+  conf: function(){ SYNCM.conflict = false; smSave(); liveSync(); render(); },
   confPull: function(){
     UI._confOpen = false;
     bakSave("نسخة الجهاز قبل اعتماد السحابة");
@@ -10345,12 +10398,13 @@ function beat(){
       else { try{ FB.db.ref("private/live/"+k).remove(); }catch(e){} }
     });
     var was = !!SYNC.multi;
-    SYNC.multi = other;
+    SYNC.multi = null;          /* v7.9: مفيش تحذير «جهاز تاني» — المزامنة لحظية */
     if(!!other !== was) render();
   }).catch(function(){});
 }
 var _beatT = null;
 function beatStart(){
+  liveStart();
   if(_beatT) return;
   beat();
   _beatT = setInterval(beat, 60000);
@@ -10359,7 +10413,7 @@ function beatStart(){
 /* شريط التحذير — بيتحط فوق كل حاجة عشان ما يتفوتش */
 function warnBar(){
   var el = document.getElementById("warnBar");
-  var show = FB.role==="teacher" && (SYNC.multi || SYNCM.conflict) && !UI.warnHid;
+  var show = false;   /* v7.9: التعارض بيتحل لوحده — مفيش شريط */
   if(!show){ if(el) el.remove(); return; }
   if(!el){
     el = document.createElement("div");
