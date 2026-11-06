@@ -470,7 +470,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "7.9";
+var APP_VER = "7.9.1";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -9560,7 +9560,8 @@ var ACTS = {
   stuReport: function(el){ modalStuReport(el.dataset.s); },
   srRange: function(el){
     var now = new Date(), f;
-    if(el.dataset.r==="m") f = new Date(now.getFullYear(), now.getMonth(), 1);
+    if(el.dataset.r==="p5") f = new Date(now.getFullYear(), now.getMonth()-1, 5);
+    else if(el.dataset.r==="m") f = new Date(now.getFullYear(), now.getMonth(), 1);
     else if(el.dataset.r==="m3") f = new Date(now.getFullYear(), now.getMonth()-2, 1);
     else f = new Date(now.getFullYear(), num(DB.meta.startMonth,9)-1, 1);
     if(el.dataset.r==="all" && f > now) f = new Date(now.getFullYear()-1, num(DB.meta.startMonth,9)-1, 1);
@@ -11945,9 +11946,9 @@ function reportKindOf(opts){
 }
 /* المدة الافتراضية: من أول بيانات الطالب لحد النهاردة */
 function reportRange(sid){
-  var f0 = firstDataDate(sid);
+  /* طلب الأستاذ: من يوم ٥ في الشهر اللي فات لحد النهاردة */
   var now = new Date();
-  return { from: f0 || iso(new Date(now.getFullYear(), now.getMonth(), 1)), to: today() };
+  return { from: iso(new Date(now.getFullYear(), now.getMonth()-1, 5)), to: today() };
 }
 
 function modalStuReport(sid, kind){
@@ -11958,14 +11959,15 @@ function modalStuReport(sid, kind){
   openModal(mh("تقرير: "+s.name)+'<div class="mb">'+
     (function(){
       var R0 = stuReportData(sid, RG.from, RG.to);
-      var any = R0.att.total || R0.tk.total || R0.tk.excused || R0.ex.rows.length || R0.money.payRows.length;
+      var any = R0.att.total || R0.tk.total || R0.tk.excused || R0.ex.rows.length || R0.money.payRows.length ||
+                (R0.money.simple||[]).length;
       return any
         ? '<div class="note ok" style="margin-bottom:11px">'+
           '<b>البيانات المتاحة:</b> '+
           [R0.att.total? ar(R0.att.total)+" حصة":"",
            R0.tk.total? ar(R0.tk.total)+" واجب":"",
            R0.ex.rows.length? ar(R0.ex.rows.length)+" امتحان":"",
-           R0.money.payRows.length? ar(R0.money.payRows.length)+" دفعة":""
+           (R0.money.simple||[]).length? ar(R0.money.simple.length)+" بند مالي":""
           ].filter(Boolean).join(" · ")+'</div>'
         : '<div class="note warn" style="margin-bottom:11px">'+
           '<b>مفيش بيانات مسجّلة للطالب ده لسه</b><br>'+
@@ -11978,9 +11980,7 @@ function modalStuReport(sid, kind){
       '<input type="date" id="sr_to" value="'+RG.to+'"></label>'+
     '</div>'+
     '<div class="row" style="margin-bottom:12px">'+
-      '<button class="btn ghost sm" data-act="srRange" data-r="m">الشهر ده</button>'+
-      '<button class="btn ghost sm" data-act="srRange" data-r="m3">آخر ٣ شهور</button>'+
-      '<button class="btn ghost sm" data-act="srRange" data-r="all">من أول السنة</button>'+
+      '<button class="btn ghost sm" data-act="srRange" data-r="p5">من ٥ الشهر اللي فات لحد النهاردة</button>'+
     '</div>'+
     '<div style="font-size:12.5px;color:var(--mut);font-weight:600;margin-bottom:7px">'+
       'يشمل التقرير <span style="font-weight:400">(قسم واحد = تقرير منفصل · أكتر من قسم = التقرير الشامل)</span></div>'+
@@ -12075,6 +12075,26 @@ function stuReportData(sid, from, to){
       return { date:p2.date, what:payWhat(p2), amount:num(p2.amount) };
     }).sort(function(a,b){ return String(b.date).localeCompare(String(a.date)); })
   };
+  /* المالي المبسّط (طلب الأستاذ): لكل شهر في المدة مبلغه واتدفع ولا لأ،
+     والحصص في سطر واحد مجمّع — من غير مستحقات وصافي وخصومات */
+  var fromMk = String(from||"").slice(0,7);
+  var simple = [], sesN = 0, sesAmt = 0, sesPaid = 0;
+  if(!money2.exempt) F2.rows.forEach(function(R){
+    if(R.date > upto) return;
+    if(R.kind==="month"){
+      if(fromMk && String(R.mk||R.date).slice(0,7) < fromMk) return;
+      var g = groupById(R.gid);
+      simple.push({ what:R.what + (gs.length>1 && g ? " — "+g.name : ""), mk:R.mk||R.date,
+                    amount:num(R.amount), paid:num(R.paidAmt), rest:num(R.rest) });
+    }else{
+      if(from && R.date < from) return;
+      sesN++; sesAmt += num(R.amount); sesPaid += num(R.paidAmt);
+    }
+  });
+  simple.sort(function(a,b){ return String(a.mk).localeCompare(String(b.mk)); });
+  if(sesN) simple.push({ what:"الحصص ("+ar(sesN)+(sesN>2 && sesN<11 ? " حصص)" : " حصة)"), amount:sesAmt, paid:sesPaid,
+                         rest:Math.max(0, sesAmt-sesPaid), ses:true });
+  money2.simple = simple;
   return { s:s, gs:gs, from:from, to:to, att:att, tk:tk, ex:ex, money:money2 };
 }
 
@@ -12152,33 +12172,15 @@ function stuReportHTML(sid, from, to, opts){
         '</div>');
     }else{
       H += sec("الموقف المالي",
-        '<p><b>نظام الدفع:</b> '+esc(M.mode)+'</p>'+
-        '<div class="st">'+
-          '<div>المستحقات<b>'+n(M.gross)+' ج</b></div>'+
-          '<div>الخصومات<b>'+n(M.disc)+' ج</b></div>'+
-          '<div>صافي المستحق<b>'+n(M.net)+' ج</b></div>'+
-          '<div>المدفوع<b>'+n(M.paidDue)+' ج</b></div>'+
-          '<div>المتبقي<b style="'+(M.rest?"color:#CC3B3B":"")+'">'+n(M.rest)+' ج</b></div>'+
-          '<div>منها متأخرات<b style="'+(M.arrears?"color:#CC3B3B":"")+'">'+n(M.arrears)+' ج</b></div>'+
-        '</div>'+
-        (M.dues.length
-          ? '<table><thead><tr><th>تاريخ الاستحقاق</th><th>المستحق</th><th>الأصلي</th><th>الخصم</th>'+
-            '<th>الصافي</th><th>المدفوع</th><th>المتبقي</th><th>الحالة</th></tr></thead><tbody>'+
-            M.dues.map(function(r){
-              var g = groupById(r.gid);
-              return '<tr><td>'+fmtD(r.date)+'</td><td>'+esc(r.what)+(g? ' — '+esc(g.name) : '')+'</td>'+
-                '<td>'+n(r.gross)+'</td><td>'+(r.disc? n(r.disc) : "—")+'</td><td>'+n(r.amount)+'</td>'+
-                '<td>'+n(r.paidAmt)+'</td><td class="'+(r.rest?"bad":"")+'"><b>'+n(r.rest)+'</b></td>'+
-                '<td>'+esc((PAY_ST[r.st]||PAY_ST.none).t)+(r.rest && r.date<today()? ' · متأخر' : '')+'</td></tr>';
+        (M.simple.length
+          ? '<table><thead><tr><th>الشهر</th><th>المبلغ</th><th>اتدفع؟</th></tr></thead><tbody>'+
+            M.simple.map(function(r){
+              var st = !r.rest ? '<td class="okc">اتدفع ✓</td>'
+                     : (r.paid ? '<td class="bad">اتدفع جزء ('+n(r.paid)+' ج) — باقي '+n(r.rest)+' ج</td>'
+                               : '<td class="bad">ما اتدفعش ✗</td>');
+              return '<tr><td><b>'+esc(r.what)+'</b></td><td>'+n(r.amount)+' ج</td>'+st+'</tr>';
             }).join("")+'</tbody></table>'
-          : '<p class="mut">مفيش مستحقات في المدة دي.</p>')+
-        (M.discs.length ? '<p><b>الخصومات السارية:</b> '+M.discs.map(function(dc){
-            return esc(discName(dc))+' ('+esc(discValueTxt(dc))+')'; }).join(" · ")+'</p>' : '')+
-        (M.payRows.length
-          ? '<h3>المدفوعات في المدة</h3><table><thead><tr><th>التاريخ</th><th>البيان</th><th>المبلغ</th></tr></thead><tbody>'+
-            M.payRows.map(function(r){
-              return '<tr><td>'+fmtD(r.date)+'</td><td>'+esc(r.what)+'</td><td>'+n(r.amount)+' ج</td></tr>';
-            }).join("")+'</tbody></table>' : ''));
+          : '<p class="mut">مفيش مبالغ مطلوبة في المدة دي.</p>'));
     }
   }
   if(opts.notes && R.s.note)
@@ -12212,7 +12214,7 @@ function stuReportHTML(sid, from, to, opts){
     'table{width:100%;border-collapse:collapse;font-size:11.5px;margin-top:8px}'+
     'th,td{padding:6px 7px;border:1px solid #DCE6E4;text-align:right;vertical-align:top}'+
     'th{background:#EDF2F1;font-weight:700}'+
-    'td.bad{color:#CC3B3B;font-weight:700}td.mutc{color:#6A7F80}'+
+    'td.bad{color:#CC3B3B;font-weight:700}td.mutc{color:#6A7F80}td.okc{color:#0A6B3D;font-weight:700}'+
     '.st{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}'+
     '.st div{flex:1;min-width:92px;border:1px solid #DCE6E4;border-radius:9px;padding:7px 11px;font-size:11px;color:#6A7F80}'+
     '.st b{display:block;font-family:Cairo,sans-serif;font-size:17px;color:#0E1A2B;margin-top:1px}'+
@@ -12310,14 +12312,16 @@ function htmlToPdf(html){
         var J = window.jspdf.jsPDF;
         var pdf = new J({ unit:"mm", format:"a4", orientation:"portrait", compress:true });
         var MT = 8, avail = Math.floor((297 - MT*2) * PW / 210);   /* ارتفاع الصفحة بالبكسل */
+        /* نهاية المحتوى الفعلي — عشان مايطلعش صفحة فاضية في الآخر */
+        var END = cuts.length ? Math.min(H, cuts[cuts.length-1] + 24) : H;
         var y = 0, pages = [];
-        while(y < H - 4){
+        while(y < END - 4){
           var lim = y + avail, cut = lim;
-          if(lim < H){
+          if(lim < END){
             var best = 0;
             cuts.forEach(function(c){ if(c > y + avail*0.4 && c <= lim) best = c; });
             if(best) cut = best;
-          }else cut = H;
+          }else cut = END;
           pages.push([y, cut]); y = cut;
         }
         pages.forEach(function(pg, i){
