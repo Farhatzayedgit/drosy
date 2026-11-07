@@ -470,7 +470,7 @@ function fbPush(path, val){
    كل حاجة في مكان واحد، والحضور مربوط بالفلوس مباشرة:
    تسجّل حضور الحصة → التحصيل بيتحدّث لوحده.
    ============================================================ */
-var APP_VER = "8.0";
+var APP_VER = "8.1";
 var KEY = "dorosy_v1";
 var DB = null;
 
@@ -1248,6 +1248,7 @@ function liveSync(){
   syncDown().then(function(st){ if(st==="pulled") render(); });
 }
 function liveStart(){
+  try{ pendStart(); }catch(e){}
   if(SYNC._live || !FB.db || FB.role!=="teacher") return;
   SYNC._live = true;
   try{
@@ -10608,8 +10609,9 @@ function modalCloud(){
         (SYNC.at? fmtD(iso(new Date(SYNC.at))) : "لسه")+'</div></div>'+
     '</div><div class="sep"></div>'+
     '<button class="btn block" data-act="syncNow" style="margin-bottom:8px">↻ ارفع البيانات دلوقتي</button>'+
-    '<button class="btn '+(OFF.on?"":"ghost ")+'block" data-act="offRev" style="margin-bottom:8px">📋 تعديلات وإنت أوفلاين'+
-      (OFF.on ? ' ('+ar(offCount())+') — مستنية مراجعتك' : ' — مفيش حاجة مستنية')+'</button>'+
+    '<button class="btn '+((OFF.on||pendCount())?"":"ghost ")+'block" data-act="offRev" style="margin-bottom:8px">📋 تعديلات وإنت أوفلاين'+
+      (OFF.on ? ' — '+ar(offCount())+' على الجهاز ده' : '')+
+      (pendCount() ? ' — '+ar(pendCount())+' مستنية موافقتك' : (OFF.on ? '' : ' — مفيش حاجة مستنية'))+'</button>'+
     '<button class="btn ghost block" data-act="pullBookings" style="margin-bottom:8px">↓ اسحب طلبات الحجز</button>'+
     '<button class="btn ghost block" data-act="baks" style="margin-bottom:8px">◷ النسخ الاحتياطية التلقائية</button>'+
     '<div class="note '+(SYNC.multi?"bad":"")+'" style="margin-bottom:8px">'+
@@ -12652,7 +12654,7 @@ function modalNeedParent(sid, kind, from, to){
 })();
 
 /* ============================================================
-   مراجعة تعديلات الأوفلاين  (v8.0)
+   مراجعة تعديلات الأوفلاين  (v8.0 — الموافقة من أي جهاز v8.1)
 
    وإنت أونلاين: كل تعديل بيترفع على طول زي ما هو.
    لو النت قطع وعدّلت حاجة: التعديلات بتتحفظ على الجهاز بس،
@@ -12740,28 +12742,82 @@ function offBaseOrCloud(){
     return {};
   });
 }
-/* ---------- هل النت رجع فعلًا؟ ---------- */
+/* ============================================================
+   الموافقة من أي جهاز  (v8.1)
+   أول ما النت يرجع على الجهاز اللي اتعدّل عليه أوفلاين، التعديلات
+   **مابتتطبّقش** — بتتبعت للسحابة كدفعة «مستنية موافقة» في
+   private/pending، والجهاز نفسه بيرجع لنسخة السحابة.
+   أي جهاز داخل بحساب الأستاذ (من أي مكان) بيشوف الدفعات دي
+   لحظيًا، ويوافق على الكل أو جزء أو يعدّل أو يرفض.
+   كل دفعة شايلة القيم اللي اتعدّلت بس (مش البيانات كلها)، فالتطبيق
+   بيتعمل على أحدث نسخة سحابة من أي جهاز.
+   ============================================================ */
+var PEND = { list:[], live:false };
+function pendCount(){
+  return PEND.list.reduce(function(a,b){ return a + ((b.items||[]).length); }, 0);
+}
+/* بنشيل من البيانات اللي على الجهاز الحاجات اللي اتعدّلت بس */
+function offSubset(L, items){
+  var S = { sessions:{}, seq:num(L.seq,1) };
+  function put(list, x){ if(x){ (S[list] = S[list] || []).push(jcp(x)); } }
+  items.forEach(function(it){
+    if(it.kind==="att" || it.kind==="sesMeta"){
+      var s = (L.sessions||{})[it.k];
+      if(s) S.sessions[it.k] = jcp(s);
+      (it.dues||[]).forEach(function(du){ if(du.op!=="del") put("sesDue", nameIn(L,"sesDue",du.id)); });
+    }else if(it.kind==="list"){
+      (it.ids||[]).forEach(function(id){ if(it.op!=="del") put(it.list, nameIn(L, it.list, id)); });
+    }else if(it.kind==="top"){
+      if(L[it.key]!==undefined) S[it.key] = jcp(L[it.key]);
+    }
+  });
+  return S;
+}
+function pendId(){ return "p"+Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
+
+/* ---------- النت رجع على الجهاز اللي اتعدّل عليه → نبعت للمراجعة ---------- */
 function offCheck(){
-  if(!OFF.on || OFF.ready) return;
+  if(!OFF.on || OFF.busy) return;
   if(!navigator.onLine || !fbOn() || FB.role!=="teacher" || !FB.db) return;
+  OFF.busy = true;
+  var items = [], n = 0;
   fbGet("private/meta").then(function(){ return offBaseOrCloud(); }).then(function(B){
     if(!OFF.on) return;
-    OFF.ready = true;
-    var n = 0;
-    try{ n = offDiff(B, DB).length; }catch(e){ n = 1; }
-    _offN = { at:Date.now(), n:n };
-    offBar();
-    if(!n){ offFinishNoChanges(); return; }
-    toast("النت رجع — عندك "+ar(n)+" تعديل اتعملوا وإنت أوفلاين. راجعهم قبل ما يترفعوا");
-    try{
-      if(document.hidden && window.Notification && Notification.permission==="granted")
-        new Notification("دروسي", { body:"عندك "+n+" تعديل اتعملوا وإنت أوفلاين — افتح البرنامج وراجعهم" });
-    }catch(e){}
-    if(!UI._offPrompted && !$("#mask").classList.contains("on")){
-      UI._offPrompted = true;
-      modalOffReview();
-    }
-  }).catch(function(){});
+    items = offDiff(B, DB);
+    n = items.length;
+    if(!n){ OFF.busy = false; offFinishNoChanges(); return; }
+    var id = pendId();
+    var batch = jcp({ id:id, dev:DEV_ID, devName:DEV_NAME, since:OFF.since, at:Date.now(),
+                      items:items, data:offSubset(DB, items) });
+    return fbSet("private/pending/"+id, batch).then(function(){
+      /* اتبعتت — الجهاز ده يرجع لنسخة السحابة لحد ما حد يوافق */
+      try{ bakSave("تعديلات الأوفلاين قبل إرسالها للمراجعة"); }catch(e){}
+      offClear(); queueClear();
+      SYNCM.dirty = false; smSave();
+      PEND.mine = PEND.mine || {}; PEND.mine[id] = 1;
+      return offRevertToCloud().then(function(){
+        OFF.busy = false;
+        render();
+        toast("النت رجع — "+ar(n)+" تعديل اتعملوا وإنت أوفلاين اتبعتوا للمراجعة. تقدر توافق عليهم من أي جهاز داخل بحساب الأستاذ");
+      });
+    });
+  }).catch(function(){ OFF.busy = false; });   /* هنحاول تاني بعد شوية */
+}
+/* الجهاز يرجع لنسخة السحابة بالظبط (حتى لو رقم النسخة ما اتغيّرش) —
+   عشان التعديلات اللي مستنية موافقة ماتبانش كأنها اتطبّقت ولا تترفع لوحدها */
+function offRevertToCloud(){
+  return Promise.all([fbGet("private/db"), fbGet("private/meta").catch(function(){ return null; })]).then(function(r){
+    var v = r[0]; if(!v || !v.meta) return;
+    QUIET++;
+    DB = v;
+    normalizeDB();
+    try{ ensureCodes(); }catch(e){}
+    saveRaw();
+    QUIET--;
+    SYNCM.seen = (r[1] && typeof r[1].rev==="number") ? r[1].rev : SYNCM.seen;
+    SYNCM.dirty = false; SYNCM.conflict = false; smSave();
+    baseMark();
+  });
 }
 /* مفيش فرق فعلي → نرجع للوضع العادي ونسحب من السحابة */
 function offFinishNoChanges(){
@@ -12770,10 +12826,40 @@ function offFinishNoChanges(){
   syncDown().then(function(){ baseMark(); render(); });
 }
 
+/* ---------- الاستماع للدفعات المستنية — على كل الأجهزة ---------- */
+function pendSeen(){ try{ return JSON.parse(localStorage.getItem(KEY+"_pendSeen")||"{}"); }catch(e){ return {}; } }
+function pendStart(){
+  if(PEND.live || !FB.db || FB.role!=="teacher") return;
+  PEND.live = true;
+  try{
+    FB.db.ref("private/pending").on("value", function(sn){
+      var v = sn.val() || {};
+      PEND.list = Object.keys(v).map(function(k){ var b = v[k] || {}; b.id = b.id || k; return b; })
+        .filter(function(b){ return b.items && b.items.length; })
+        .sort(function(a,b){ return num(a.at)-num(b.at); });
+      try{ offBar(); }catch(e){}
+      var seen = pendSeen(), fresh = PEND.list.filter(function(b){ return !seen[b.id]; });
+      if(!fresh.length) return;
+      fresh.forEach(function(b){ seen[b.id] = 1; });
+      try{ localStorage.setItem(KEY+"_pendSeen", JSON.stringify(seen)); }catch(e){}
+      var n = fresh.reduce(function(a,b){ return a+b.items.length; },0);
+      var who = fresh[0].dev===DEV_ID ? "الجهاز ده" : (fresh[0].devName || "جهاز تاني");
+      toast("🔔 "+ar(n)+" تعديل اتعملوا أوفلاين على "+who+" — مستنيين موافقتك");
+      try{
+        if(document.hidden && window.Notification && Notification.permission==="granted")
+          new Notification("دروسي", { body:n+" تعديل اتعملوا أوفلاين على "+who+" — مستنيين موافقتك" });
+      }catch(e){}
+      if(!UI.locked && !$("#mask").classList.contains("on")) modalOffReview();
+      else if($("#mask").classList.contains("on") && UI.offRev) modalOffReview();
+    });
+  }catch(e){ PEND.live = false; }
+}
+
 /* ---------- الشريط ---------- */
 function offBar(){
   var el = document.getElementById("offBar");
-  var show = OFF.on && FB.role==="teacher";
+  var pn = pendCount();
+  var show = FB.role==="teacher" && (OFF.on || pn);
   if(!show){ if(el) el.remove(); return; }
   if(!el){
     el = document.createElement("div");
@@ -12786,19 +12872,22 @@ function offBar(){
       document.head.appendChild(st);
     }
   }
-  var n = offCount();
-  var ready = OFF.ready;
+  var n = OFF.on ? offCount() : 0;
+  var ready = !OFF.on && pn;
   el.style.cssText = "position:fixed;left:12px;right:12px;bottom:14px;z-index:190;max-width:560px;margin:0 auto;"+
     "border-radius:14px;padding:10px 12px;font-size:13px;display:flex;gap:10px;align-items:center;"+
     "box-shadow:0 6px 22px rgba(0,0,0,.25);color:#fff;"+
     "background:"+(ready ? "#C77A0A" : "#37474F");
+  var devs = {};
+  PEND.list.forEach(function(b){ devs[b.dev===DEV_ID ? "الجهاز ده" : (b.devName||"جهاز")] = 1; });
   el.innerHTML = '<span style="flex:1;line-height:1.6">'+
-    (ready
-      ? '🔔 <b>النت رجع</b> — عندك <b>'+ar(n)+'</b> تعديل اتعملوا وإنت أوفلاين، مستنيين موافقتك'
-      : '📴 <b>مفيش نت</b> — '+(n ? '<b>'+ar(n)+'</b> تعديل محفوظين على الجهاز، وهتراجعهم قبل ما يترفعوا'
-                                    : 'أي تعديل هيتحفظ على الجهاز وتراجعه لما النت يرجع'))+
+    (OFF.on
+      ? '📴 <b>مفيش نت</b> — '+(n ? '<b>'+ar(n)+'</b> تعديل محفوظين على الجهاز، وهيتبعتوا للموافقة أول ما النت يرجع'
+                                    : 'أي تعديل هيتحفظ على الجهاز ويتبعت للموافقة لما النت يرجع')+
+        (pn ? ' · و<b>'+ar(pn)+'</b> مستنيين موافقة' : '')
+      : '🔔 <b>'+ar(pn)+'</b> تعديل اتعملوا أوفلاين ('+esc(Object.keys(devs).join("، "))+') — مستنيين موافقتك')+
     '</span>'+
-    (n ? '<button data-act="offRev" style="flex:0 0 auto;background:#fff;color:'+(ready?"#8A5200":"#263238")+
+    ((n || pn) ? '<button data-act="offRev" style="flex:0 0 auto;background:#fff;color:'+(ready?"#8A5200":"#263238")+
          ';border:0;border-radius:9px;padding:7px 12px;font:inherit;font-weight:800">'+(ready?"راجعهم":"اعرضهم")+'</button>' : '');
 }
 
@@ -12970,7 +13059,7 @@ function offApplyItem(M, L, it){
       if(v===undefined){ if(m[f]) delete m[f][it.sid]; }
       else{ m[f] = m[f] || {}; m[f][it.sid] = jcp(v); }
     });
-    it.dues.forEach(function(du){ offApplyList(M, L, "sesDue", du.id, du.op); });
+    (it.dues||[]).forEach(function(du){ offApplyList(M, L, "sesDue", du.id, du.op); });
   }else if(it.kind==="sesMeta"){
     var l2 = (L.sessions||{})[it.k] || {};
     M.sessions[it.k] = M.sessions[it.k] || {};
@@ -12980,7 +13069,7 @@ function offApplyItem(M, L, it){
   }else if(it.kind==="sesDel"){
     if(M.sessions) delete M.sessions[it.k];
   }else if(it.kind==="list"){
-    it.ids.forEach(function(id){ offApplyList(M, L, it.list, id, it.op); });
+    (it.ids||[]).forEach(function(id){ offApplyList(M, L, it.list, id, it.op); });
   }else if(it.kind==="top"){
     if(L[it.key]===undefined) delete M[it.key]; else M[it.key] = jcp(L[it.key]);
   }
@@ -12994,143 +13083,188 @@ function offApplyList(M, L, list, id, op){
 }
 
 /* ============================================================
-   نافذة المراجعة
+   نافذة المراجعة — الدفعات المستنية من كل الأجهزة
+   + (لو الجهاز ده أوفلاين) التعديلات اللي لسه عليه
    ============================================================ */
+function pkey(bid, iid){ return bid+"::"+iid; }
 function modalOffReview(){
-  if(!OFF.on){ toast("مفيش تعديلات أوفلاين مستنية"); return; }
-  openModal(mh("تعديلات وإنت أوفلاين")+'<div class="mb"><div class="empty"><div class="big">⏳</div>'+
-    '<b>بنجهّز التعديلات…</b></div></div>');
-  UI._offPainted = false;
-  offBaseOrCloud().then(function(B){
-    var L = DB;
-    var items = offDiff(B || {}, L);
-    var prev = UI.offRev || {};
-    UI.offRev = { items:items, pick:{}, edit:prev.edit || {} };
-    items.forEach(function(it){ UI.offRev.pick[it.id] = (prev.pick && prev.pick[it.id]===false) ? false : true; });
-    if(!items.length){
-      if(OFF.ready){ closeModal(); offFinishNoChanges(); toast("مفيش تعديلات مختلفة — اتزامنت مع السحابة"); }
-      else openModal(mh("تعديلات وإنت أوفلاين")+'<div class="mb"><div class="note ok">مفيش تعديلات لحد دلوقتي.</div></div>'+
-        '<div class="mf"><button class="btn ghost" data-act="close">إغلاق</button></div>');
-      return;
-    }
-    offRevPaint();
+  var prev = UI.offRev || {};
+  UI._offPainted = !!(prev && $("#mask").classList.contains("on"));
+  var R = { batches:[], local:[], pick:prev.pick||{}, edit:prev.edit||{} };
+  PEND.list.forEach(function(b){
+    R.batches.push(b);
+    (b.items||[]).forEach(function(it){ var k = pkey(b.id, it.id); if(R.pick[k]===undefined) R.pick[k] = true; });
   });
+  UI.offRev = R;
+  if(OFF.on){
+    offBaseOrCloud().then(function(B){
+      try{ R.local = offDiff(B||{}, DB); }catch(e){ R.local = []; }
+      offRevPaint();
+    });
+  }
+  offRevPaint();
 }
-function offRevPaint(){
-  var R = UI.offRev; if(!R) return;
-  var ready = OFF.ready && navigator.onLine;
-  var nOk = R.items.filter(function(it){ return R.pick[it.id]; }).length;
-  var cats = {};
-  R.items.forEach(function(it){ (cats[it.cat] = cats[it.cat] || []).push(it); });
-  var H = '<div class="note '+(ready?"warn":"")+'" style="margin-bottom:11px;line-height:1.8">'+
-    (ready
-      ? 'دي التعديلات اللي اتعملت <b>وإنت أوفلاين</b>'+(OFF.since? ' (من '+esc(new Date(OFF.since).toLocaleString("ar-EG",{hour:"numeric",minute:"2-digit",day:"numeric",month:"numeric"}))+')' : '')+
-        '. علّم على اللي موافق عليه وشيل العلامة من اللي مش موافق عليه. '+
-        '<b>اللي هتوافق عليه بس هو اللي هيترفع</b>، واللي هترفضه هيرجع زي ما هو في السحابة.'
-      : '<b>لسه مفيش نت.</b> دي التعديلات المحفوظة على الجهاز — هتقدر توافق عليها أو ترفضها أول ما النت يرجع.')+
-    '</div>'+
-    '<div class="row" style="margin-bottom:10px">'+
-      '<button class="btn ghost sm" data-act="offAll" data-v="1">☑ علّم الكل</button>'+
-      '<button class="btn ghost sm" data-act="offAll" data-v="0">☐ شيل الكل</button>'+
-    '</div>';
+function offItemRow(it, key, on, ed, readOnly){
+  var h = '<div class="item" style="cursor:default;padding:9px 11px;align-items:flex-start;gap:9px;'+(on||readOnly? '' : 'opacity:.55;')+'">'+
+    (readOnly ? '<span class="av" style="flex:0 0 auto">•</span>'
+              : '<input type="checkbox" class="offPick" data-id="'+esc(key)+'"'+(on?" checked":"")+
+                ' style="width:20px;height:20px;margin-top:2px;flex:0 0 auto">')+
+    '<span class="tx" style="flex:1;min-width:0"><b style="font-size:13.5px;white-space:normal">'+esc(it.title)+'</b>'+
+      '<small style="white-space:normal;line-height:1.7">'+(it.desc||"")+'</small>';
+  if(!readOnly && on && it.kind==="att")
+    h += '<span style="display:flex;gap:6px;align-items:center;margin-top:6px;font-size:12px;flex-wrap:nowrap">'+
+      '<span class="mut" style="white-space:nowrap">عدّل الحضور:</span>'+
+      '<select class="offEd" data-id="'+esc(key)+'" style="padding:4px 8px;border-radius:8px;font:inherit;font-size:12.5px">'+
+      [["","زي ما اتسجّل ("+attName(it.la)+")"],["P","حاضر"],["L","متأخر"],["A","غايب"]].map(function(o){
+        return '<option value="'+o[0]+'"'+((ed||"")===o[0]?" selected":"")+'>'+esc(o[1])+'</option>'; }).join("")+
+      '</select></span>';
+  if(!readOnly && on && it.kind==="list" && (it.list==="students"||it.list==="groups") && it.op!=="del")
+    h += '<span style="display:block;margin-top:5px"><label style="font-size:12px;display:inline-flex;gap:6px;align-items:center;cursor:pointer">'+
+      '<input type="checkbox" class="offOpen" data-id="'+esc(key)+'"'+(ed==="open"?" checked":"")+'> افتحه أعدّله بعد الموافقة</label></span>';
+  h += '</span>'+(readOnly ? '' : '<span class="tag '+(on?"ok":"")+'" style="flex:0 0 auto">'+(on?"موافق":"مرفوض")+'</span>')+'</div>';
+  return h;
+}
+function offItemsHTML(items, bid, readOnly){
+  var R = UI.offRev, cats = {}, H = "";
+  items.forEach(function(it){ (cats[it.cat] = cats[it.cat] || []).push(it); });
   ["att","students","money","groups","exams","other"].forEach(function(c){
     var arr = cats[c]; if(!arr) return;
     arr.sort(function(a,b){ return String(a.d||"").localeCompare(String(b.d||"")); });
-    H += '<div style="font-weight:800;font-size:13.5px;margin:12px 0 6px;color:var(--brand,#014A59)">'+
+    H += '<div style="font-weight:800;font-size:13px;margin:10px 0 6px;color:var(--brand,#014A59)">'+
          esc(OFF_CAT[c])+' <span class="mut" style="font-weight:400">('+ar(arr.length)+')</span></div>'+
-         '<div style="border:1px solid var(--line);border-radius:11px;overflow:hidden">';
-    arr.forEach(function(it){
-      var on = R.pick[it.id];
-      var ed = R.edit[it.id];
-      H += '<div class="item" style="cursor:default;padding:9px 11px;align-items:flex-start;gap:9px;'+
-           (on? '' : 'opacity:.55;')+'">'+
-        '<input type="checkbox" class="offPick" data-id="'+esc(it.id)+'"'+(on?" checked":"")+
-          ' style="width:20px;height:20px;margin-top:2px;flex:0 0 auto">'+
-        '<span class="tx" style="flex:1;min-width:0"><b style="font-size:13.5px;white-space:normal">'+esc(it.title)+'</b>'+
-          '<small style="white-space:normal;line-height:1.7">'+it.desc+'</small>'+
-          (it.kind==="att" && on
-            ? '<span style="display:flex;gap:6px;align-items:center;margin-top:6px;font-size:12px;flex-wrap:nowrap">'+
-                          '<span class="mut" style="white-space:nowrap">عدّل الحضور:</span>'+
-                '<select class="offEd" data-id="'+esc(it.id)+'" style="padding:4px 8px;border-radius:8px;font:inherit;font-size:12.5px">'+
-                [["","زي ما اتسجّل ("+attName(it.la)+")"],["P","حاضر"],["L","متأخر"],["A","غايب"]].map(function(o){
-                  return '<option value="'+o[0]+'"'+((ed||"")===o[0]?" selected":"")+'>'+esc(o[1])+'</option>'; }).join("")+
-                '</select></span>'
-            : '')+
-          ((it.kind==="list" && (it.list==="students"||it.list==="groups") && it.op!=="del" && on)
-            ? '<span style="display:block;margin-top:5px"><label style="font-size:12px;display:inline-flex;gap:6px;align-items:center;cursor:pointer">'+
-              '<input type="checkbox" class="offOpen" data-id="'+esc(it.id)+'"'+(R.edit[it.id]==="open"?" checked":"")+'> افتحه أعدّله بعد الموافقة</label></span>'
-            : '')+
-        '</span>'+
-        '<span class="tag '+(on?"ok":"")+'" style="flex:0 0 auto">'+(on?"موافق":"مرفوض")+'</span></div>';
-    });
-    H += '</div>';
+         '<div style="border:1px solid var(--line);border-radius:11px;overflow:hidden">'+
+         arr.map(function(it){
+           var k = pkey(bid, it.id);
+           return offItemRow(it, k, readOnly ? true : R.pick[k], R.edit[k], readOnly);
+         }).join("")+'</div>';
   });
+  return H;
+}
+function fmtWhen(ts){
+  try{ return new Date(ts).toLocaleString("ar-EG",{ weekday:"long", day:"numeric", month:"numeric", hour:"numeric", minute:"2-digit" }); }
+  catch(e){ return ""; }
+}
+function offRevPaint(){
+  var R = UI.offRev; if(!R) return;
+  var online = navigator.onLine && fbOn() && FB.role==="teacher" && !OFF.on;
+  var all = 0, nOk = 0;
+  R.batches.forEach(function(b){ (b.items||[]).forEach(function(it){ all++; if(R.pick[pkey(b.id,it.id)]) nOk++; }); });
+  var H = "";
+  if(!all && !R.local.length){
+    openModal(mh("تعديلات وإنت أوفلاين")+'<div class="mb"><div class="note ok">مفيش تعديلات مستنية موافقة.</div></div>'+
+      '<div class="mf"><button class="btn ghost" data-act="close">إغلاق</button></div>');
+    return;
+  }
+  if(all){
+    H += '<div class="note warn" style="margin-bottom:11px;line-height:1.8">'+
+      'دي تعديلات اتعملت على أجهزة <b>وهي أوفلاين</b>، ولسه <b>ماتطبّقتش</b>. '+
+      'علّم على اللي موافق عليه وشيل العلامة من اللي مش موافق عليه — '+
+      '<b>اللي هتوافق عليه بس هو اللي هيتطبّق</b>، والباقي هيترفض.'+
+      (online ? '' : '<br><b>لازم نت عشان توافق.</b>')+'</div>'+
+      '<div class="row" style="margin-bottom:6px">'+
+        '<button class="btn ghost sm" data-act="offAll" data-v="1">☑ علّم الكل</button>'+
+        '<button class="btn ghost sm" data-act="offAll" data-v="0">☐ شيل الكل</button>'+
+      '</div>';
+    R.batches.forEach(function(b){
+      H += '<div style="margin-top:12px;padding:9px 11px;border-radius:11px;background:var(--soft,#EEF3F2);font-size:12.5px;line-height:1.7">'+
+        '📱 <b>'+esc(b.dev===DEV_ID ? "الجهاز ده ("+(b.devName||"")+")" : (b.devName||"جهاز"))+'</b> — '+ar((b.items||[]).length)+' تعديل'+
+        '<br><span class="mut">النت قطع عنده: '+esc(fmtWhen(b.since))+' · وصلت: '+esc(fmtWhen(b.at))+'</span></div>'+
+        offItemsHTML(b.items||[], b.id, false);
+    });
+  }
+  if(R.local.length){
+    H += '<div class="note" style="margin:14px 0 6px;line-height:1.8"><b>على الجهاز ده ولسه مفيش نت ('+ar(R.local.length)+')</b><br>'+
+      'محفوظين هنا، وأول ما النت يرجع هيتبعتوا للموافقة على أي جهاز داخل بحساب الأستاذ.</div>'+
+      offItemsHTML(R.local, "local", true);
+  }
   var sc0 = document.querySelector("#modal .mb"), top0 = (sc0 && UI._offPainted) ? sc0.scrollTop : 0;
   UI._offPainted = true;
-  openModal(mh("تعديلات وإنت أوفلاين ("+ar(R.items.length)+")")+'<div class="mb">'+H+'</div>'+
+  openModal(mh("تعديلات مستنية موافقة"+(all? " ("+ar(all)+")" : ""))+'<div class="mb">'+H+'</div>'+
     '<div class="mf" style="flex-wrap:wrap">'+
       '<button class="btn ghost" data-act="close">بعدين</button>'+
-      (ready
+      ((all && online)
         ? '<button class="btn ghost" data-act="offRejectAll" style="color:var(--bad)">✕ ارفض الكل</button>'+
           '<button class="btn" data-act="offApply"'+(nOk?'':' disabled')+'>✓ وافق على '+
-            (nOk===R.items.length ? "الكل ("+ar(nOk)+")" : "المختار ("+ar(nOk)+" من "+ar(R.items.length)+")")+'</button>'
+            (nOk===all ? "الكل ("+ar(nOk)+")" : "المختار ("+ar(nOk)+" من "+ar(all)+")")+'</button>'
         : '')+
     '</div>');
   var sc1 = document.querySelector("#modal .mb"); if(sc1 && top0) sc1.scrollTop = top0;
 }
-/* التطبيق: أحدث نسخة سحابة + التعديلات اللي اتوافق عليها */
+
+/* التطبيق: أحدث نسخة سحابة + اللي اتوافق عليه من كل دفعة */
 function offApply(rejectAll){
-  var R = UI.offRev; if(!R || !OFF.on) return;
-  if(!navigator.onLine || !fbOn() || FB.role!=="teacher"){ toast("لسه مفيش نت — استنى لما يرجع"); return; }
-  var chosen = rejectAll ? [] : R.items.filter(function(it){ return R.pick[it.id]; });
-  var nRej = R.items.length - chosen.length;
-  if(rejectAll && !confirm("هترفض كل التعديلات اللي اتعملت وإنت أوفلاين ("+R.items.length+")، "+
-     "والبرنامج هيرجع لنسخة السحابة.\n\nفيه نسخة احتياطية هتتحفظ من اللي على الجهاز لو احتجتها. تكمّل؟")) return;
+  var R = UI.offRev; if(!R || !R.batches.length) return;
+  if(OFF.on || !navigator.onLine || !fbOn() || FB.role!=="teacher"){ toast("لازم نت عشان توافق"); return; }
+  var total = 0, chosenN = 0;
+  R.batches.forEach(function(b){ (b.items||[]).forEach(function(it){ total++; if(!rejectAll && R.pick[pkey(b.id,it.id)]) chosenN++; }); });
+  if(rejectAll && !confirm("هترفض كل التعديلات المستنية ("+total+")، ومش هيتطبّق منها حاجة.\n\n"+
+     "هتتحفظ في سجل التعديلات المرفوضة لو احتجتها. تكمّل؟")) return;
   openModal(mh("بنطبّق التعديلات")+'<div class="mb"><div class="empty"><div class="big">⏳</div>'+
     '<b>بنجيب أحدث نسخة من السحابة ونطبّق اللي وافقت عليه…</b></div></div>');
-  Promise.all([fbGet("private/db"), fbGet("private/meta").catch(function(){ return null; }), offBaseGet()])
+  var batches = R.batches.slice();
+  Promise.all([fbGet("private/db"), fbGet("private/meta").catch(function(){ return null; })])
   .then(function(r){
-    var C = (r[0] && r[0].meta) ? r[0] : (r[2] || null);
+    var C = (r[0] && r[0].meta) ? r[0] : null;
     if(!C) throw new Error("مقدرناش نجيب نسخة السحابة");
     var cRev = (r[1] && typeof r[1].rev==="number") ? r[1].rev : SYNCM.seen;
-    var L = DB;
-    try{ bakSave("نسخة الجهاز قبل مراجعة تعديلات الأوفلاين"); }catch(e){}
-    var M = jcp(C);
-    chosen.forEach(function(it){ offApplyItem(M, L, it); });
-    /* سجل الواجب: بيتجمع من الاتنين */
-    Object.keys(M.sessions||{}).forEach(function(k){
-      var lg = ((L.sessions||{})[k]||{}).hwLog; if(!lg) return;
-      var have = {}; (M.sessions[k].hwLog||[]).forEach(function(x){ have[x.sid+"|"+x.at]=1; });
-      lg.forEach(function(x){ if(!have[x.sid+"|"+x.at]){ (M.sessions[k].hwLog = M.sessions[k].hwLog||[]).push(x); } });
+    try{ bakSave("قبل الموافقة على تعديلات الأوفلاين"); }catch(e){}
+    var M = jcp(C), edits = [], opens = [], seq = num(C.seq,1), decided = {};
+    batches.forEach(function(b){
+      var L = b.data || {};
+      decided[b.id] = {};
+      (b.items||[]).forEach(function(it){
+        var k = pkey(b.id, it.id), ok = !rejectAll && !!R.pick[k];
+        decided[b.id][it.id] = ok ? (R.edit[k] && R.edit[k]!=="open" ? "edited" : "ok") : "rejected";
+        if(!ok) return;
+        offApplyItem(M, L, it);
+        var e = R.edit[k];
+        if(it.kind==="att" && e && e!=="open" && e!==it.la) edits.push({ it:it, v:e });
+        if(e==="open" && it.kind==="list") opens.push(it);
+        /* سجل الواجب بيتجمع */
+        if(it.kind==="att"){
+          var lg = ((L.sessions||{})[it.k]||{}).hwLog;
+          if(lg && M.sessions[it.k]){
+            var have = {}; (M.sessions[it.k].hwLog||[]).forEach(function(x){ have[x.sid+"|"+x.at]=1; });
+            lg.forEach(function(x){ if(x.sid===it.sid && !have[x.sid+"|"+x.at]) (M.sessions[it.k].hwLog = M.sessions[it.k].hwLog||[]).push(x); });
+          }
+        }
+      });
+      seq = Math.max(seq, num(L.seq,1));
     });
-    M.seq = Math.max(num(C.seq,1), num(L.seq,1));
-    var edits = [], opens = [];
-    chosen.forEach(function(it){
-      var e = R.edit[it.id];
-      if(it.kind==="att" && e && e!==it.la) edits.push(it);
-      if(e==="open" && it.kind==="list") opens.push(it);
-    });
-    QUIET++;
-    DB = M;
-    normalizeDB();
-    try{ ensureCodes(); }catch(e){}
-    /* تعديل الحضور من المراجعة — بنفس دالة البرنامج عشان المستحقات تتظبط */
-    edits.forEach(function(it){ try{ markAtt(it.gid, it.d, it.sid, R.edit[it.id]); }catch(e){} });
-    DB.rev = num(DB.rev,0)+1; DB.at = Date.now(); DB.dev = DEV_ID;
-    saveRaw();
-    QUIET--;
-    offClear();
-    queueClear();
-    SYNCM.seen = cRev;
-    SYNCM.dirty = chosen.length > 0;
-    smSave();
-    var job = chosen.length ? syncUp() : Promise.resolve(true);
+    M.seq = seq;
+    var job = Promise.resolve(true);
+    if(chosenN){
+      QUIET++;
+      DB = M;
+      normalizeDB();
+      try{ ensureCodes(); }catch(e){}
+      edits.forEach(function(x){ try{ markAtt(x.it.gid, x.it.d, x.it.sid, x.v); }catch(e){} });
+      DB.rev = num(DB.rev,0)+1; DB.at = Date.now(); DB.dev = DEV_ID;
+      saveRaw();
+      QUIET--;
+      SYNCM.seen = cRev; SYNCM.dirty = true; smSave();
+      job = syncUp();
+    }
     return job.then(function(ok){
-      if(ok===true) baseMark();
+      if(ok!==true) throw new Error("الرفع ما كملش");
+      /* الدفعات اتقفلت — بتتنقل للسجل وتتشال من المستنية */
+      return Promise.all(batches.map(function(b){
+        return fbSet("private/pendingDone/"+b.id, jcp({ id:b.id, dev:b.dev, devName:b.devName, since:b.since, at:b.at,
+            items:b.items, data:b.data, decided:decided[b.id], decidedAt:Date.now(), decidedBy:DEV_NAME }))
+          .then(function(){ return FB.db.ref("private/pending/"+b.id).remove(); });
+      })).then(function(){
+        fbGet("private/pendingDone").then(function(v){
+          var ks = Object.keys(v||{}).sort(function(a,b){ return num(v[a].decidedAt)-num(v[b].decidedAt); });
+          while(ks.length > 30){ var k = ks.shift(); try{ FB.db.ref("private/pendingDone/"+k).remove(); }catch(e){} }
+        }).catch(function(){});
+      });
+    }).then(function(){
+      UI.offRev = null;
       closeModal(); render();
-      toast(chosen.length
-        ? "✓ اتطبّق "+ar(chosen.length)+" تعديل واترفعوا"+(nRej? " · اترفض "+ar(nRej) : "")
-        : "اترفضت كل التعديلات — البرنامج على نسخة السحابة");
+      var nRej = total - chosenN;
+      toast(chosenN
+        ? "✓ اتطبّق "+ar(chosenN)+" تعديل"+(nRej? " · اترفض "+ar(nRej) : "")
+        : "اترفضت كل التعديلات المستنية");
       if(opens.length){
         var it = opens[0];
         setTimeout(function(){
@@ -13140,7 +13274,7 @@ function offApply(rejectAll){
       }
     });
   }).catch(function(e){
-    toast("حصلت مشكلة: "+((e&&e.message)||"")+" — التعديلات لسه محفوظة، حاول تاني");
+    toast("حصلت مشكلة: "+((e&&e.message)||"")+" — التعديلات لسه مستنية، حاول تاني");
     offRevPaint();
   });
 }
@@ -13150,7 +13284,7 @@ function offApply(rejectAll){
     offRev: function(){ modalOffReview(); },
     offAll: function(el){
       var R = UI.offRev; if(!R) return;
-      R.items.forEach(function(it){ R.pick[it.id] = el.dataset.v==="1"; });
+      R.batches.forEach(function(b){ (b.items||[]).forEach(function(it){ R.pick[pkey(b.id,it.id)] = el.dataset.v==="1"; }); });
       offRevPaint();
     },
     offApply: function(){ offApply(false); },
